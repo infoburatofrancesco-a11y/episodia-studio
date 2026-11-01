@@ -286,6 +286,14 @@ export default function SeriesHubView({
   };
 
   const handleAttachIntroVideo = (targetSeries: Series, file: File) => {
+    setIntroError(null);
+    // Verifica dimensione consigliata per il payload serverless Vercel/Supabase (~4MB)
+    if (file.size > 4.2 * 1024 * 1024) {
+      setIntroError(
+        'Il file video della Sigla supera i 4 MB. Per sincronizzarlo sul Database Cloud (Supabase) usa una clip MP4 di max 15 secondi compressa (sotto i 4 MB).'
+      );
+      return;
+    }
     const reader = new FileReader();
     reader.onload = async () => {
       if (typeof reader.result === 'string') {
@@ -1064,12 +1072,13 @@ export default function SeriesHubView({
                       <h3 className="text-lg font-bold text-white">
                         Sigla Ufficiale della Serie: &quot;{activeSeries.title}&quot; (Max 15 Secondi)
                       </h3>
-                      <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                        In Testa a Ogni Video Esportato
+                      <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1">
+                        <Database className="w-3 h-3" />
+                        Salva Video Sigla su Database Cloud (Uguale su ogni PC/Telefono)
                       </span>
                     </div>
                     <p className="text-xs text-zinc-400 mt-0.5">
-                      Genera la Sigla come una mini-puntata specifica (da 5s, 10s o max 15s). Quando è attiva, in fase di esportazione viene aggiunta automaticamente nei primi {activeSeries.intro?.durationSeconds || introDuration} secondi di ogni episodio!
+                      A differenza dei video finali delle puntate (che vengono salvati solo in locale), il <strong>Video Sigla (max 15s)</strong> viene memorizzato nel <strong>Database Cloud Supabase</strong> così da essere identico e collegato automaticamente in testa a ogni video generato da qualsiasi telefono o PC!
                     </p>
                   </div>
                 </div>
@@ -1180,14 +1189,14 @@ export default function SeriesHubView({
                       )}
                     </button>
 
-                    {/* Carica video master della sigla (max 15s) salvato in locale */}
+                    {/* Carica video master della sigla (max 15s) salvato su Database Cloud (Supabase) */}
                     <div className="pt-2 border-t border-zinc-800 flex items-center justify-between gap-2">
-                      <label className="w-full cursor-pointer py-2.5 px-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-semibold text-zinc-300 flex items-center justify-center gap-2 transition">
-                        <Upload className="w-3.5 h-3.5 text-amber-400" />
+                      <label className="w-full cursor-pointer py-2.5 px-3 rounded-xl bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-500/40 text-xs font-bold text-emerald-200 flex items-center justify-center gap-2 transition">
+                        <Upload className="w-3.5 h-3.5 text-emerald-400" />
                         <span>
                           {activeSeries.intro?.introVideoUrl
-                            ? 'Sostituisci Video Sigla Locale (MP4 max 15s)'
-                            : 'Carica Video Sigla Finale in Locale (MP4 max 15s)'}
+                            ? 'Sostituisci Video Sigla sul Database Cloud (MP4 max 15s)'
+                            : 'Carica Video Sigla su Database Cloud (MP4 max 15s)'}
                         </span>
                         <input
                           type="file"
@@ -1202,14 +1211,28 @@ export default function SeriesHubView({
                     </div>
 
                     {activeSeries.intro?.introVideoUrl && (
-                      <div className="pt-2">
-                        <span className="text-[10px] font-bold uppercase text-emerald-400 block mb-1">
-                          Anteprima Video Sigla in Testa ({activeSeries.intro.durationSeconds}s):
-                        </span>
+                      <div className="pt-2 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-bold uppercase text-emerald-400 flex items-center gap-1">
+                            <Database className="w-3 h-3" />
+                            Video Sigla Salvato su Database Cloud ({activeSeries.intro.durationSeconds}s):
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleUpdateIntroField(activeSeries, {
+                                introVideoUrl: undefined,
+                              })
+                            }
+                            className="text-[10px] text-zinc-400 hover:text-red-400"
+                          >
+                            Rimuovi video sigla
+                          </button>
+                        </div>
                         <video
                           src={activeSeries.intro.introVideoUrl}
                           controls
-                          className="w-full max-h-44 rounded-xl border border-zinc-800 bg-black object-contain"
+                          className="w-full max-h-44 rounded-xl border border-emerald-500/30 bg-black object-contain"
                         />
                       </div>
                     )}

@@ -211,6 +211,8 @@ function attachLocalMediaToEpisodes(
   }));
 }
 
+// Per le Serie TV, il Video Sigla (introVideoUrl e gli shot della sigla) è salvato sul Database Cloud
+// così è identico su qualsiasi telefono o PC, con fallback sulla cache locale se offline.
 function attachLocalMediaToSeries(
   seriesList: Series[],
   mediaMap: Record<string, string>
@@ -222,10 +224,10 @@ function attachLocalMediaToSeries(
       ...s,
       intro: {
         ...s.intro,
-        introVideoUrl: mediaMap[introKey] || s.intro.introVideoUrl,
+        introVideoUrl: s.intro.introVideoUrl || mediaMap[introKey],
         shots: (s.intro.shots || []).map((shot) => ({
           ...shot,
-          videoUrl: mediaMap[shot.id] || shot.videoUrl,
+          videoUrl: shot.videoUrl || mediaMap[shot.id],
         })),
       },
     };

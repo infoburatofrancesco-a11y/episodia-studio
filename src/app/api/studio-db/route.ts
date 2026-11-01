@@ -13,6 +13,7 @@ const DEFAULT_DB: StudioDatabasePayload = {
   updatedAt: new Date().toISOString(),
 };
 
+// I video degli episodi finali restano SOLO in locale (vengono rimossi prima del salvataggio su DB Cloud)
 function stripHeavyGeneratedMedia(episodes: Episode[]): Episode[] {
   return episodes.map((ep) => ({
     ...ep,
@@ -29,24 +30,22 @@ function stripHeavyGeneratedMedia(episodes: Episode[]): Episode[] {
   }));
 }
 
-function stripHeavySeriesIntroMedia(seriesList: Series[]): Series[] {
+// UNICA ECCEZIONE: Il Video Sigla della Serie (max 15s) VIENE SALVATO SUL DATABASE CLOUD
+// in modo che sia identico su qualsiasi telefono o PC quando si genera/esporta un episodio.
+function preserveSeriesIntroMediaForCloud(seriesList: Series[]): Series[] {
   return seriesList.map((s) => {
     if (!s.intro) return s;
     const cleanIntro = { ...s.intro };
+    // Rimuoviamo solo eventuali blob: URL effimeri, ma MANTENIAMO data:video/... (Base64) e URL remoti sul DB!
     if (
       cleanIntro.introVideoUrl &&
-      (cleanIntro.introVideoUrl.startsWith('data:video') ||
-        cleanIntro.introVideoUrl.startsWith('blob:'))
+      cleanIntro.introVideoUrl.startsWith('blob:')
     ) {
       delete cleanIntro.introVideoUrl;
     }
     cleanIntro.shots = (cleanIntro.shots || []).map((shot) => {
       const cleanShot = { ...shot };
-      if (
-        cleanShot.videoUrl &&
-        (cleanShot.videoUrl.startsWith('data:video') ||
-          cleanShot.videoUrl.startsWith('blob:'))
-      ) {
+      if (cleanShot.videoUrl && cleanShot.videoUrl.startsWith('blob:')) {
         delete cleanShot.videoUrl;
       }
       return cleanShot;
@@ -218,7 +217,7 @@ export async function POST(req: NextRequest) {
     const updatedPayload: StudioDatabasePayload = {
       cast: Array.isArray(body.cast) ? body.cast : currentDb.cast,
       series: Array.isArray(body.series)
-        ? stripHeavySeriesIntroMedia(body.series)
+        ? preserveSeriesIntroMediaForCloud(body.series)
         : currentDb.series,
       episodes: Array.isArray(body.episodes)
         ? stripHeavyGeneratedMedia(body.episodes)
