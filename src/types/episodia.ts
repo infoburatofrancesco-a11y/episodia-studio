@@ -2,9 +2,11 @@ export interface Character {
   id: string;
   name: string;
   category: 'human' | 'animal';
+  actorRole?: string;
   personality: string;
   visualDescriptor: string;
   referenceImageBase64: string;
+  referenceImagesBase64?: string[];
   voiceId?: string;
 }
 
@@ -62,6 +64,7 @@ export interface CloudSyncConfig {
   enabled: boolean;
   remoteEndpointUrl?: string;
   remoteApiKey?: string;
+  customGeminiApiKey?: string;
   lastSyncedAt?: string;
 }
 

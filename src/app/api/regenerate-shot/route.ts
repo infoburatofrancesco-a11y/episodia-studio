@@ -30,6 +30,12 @@ const singleShotSchema: Schema = {
   required: ['cameraAngle', 'visualPromptEn', 'speakerId', 'dialogueIta'],
 };
 
+const GEMINI_MODELS = [
+  'gemini-3.8-flash',
+  'gemini-3.5-flash',
+  'gemini-2.5-flash',
+];
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -59,7 +65,7 @@ export async function POST(req: NextRequest) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey || apiKey === 'la_tua_chiave_qui') {
       return NextResponse.json(
-        { error: 'GEMINI_API_KEY non configurata in .env.local.' },
+        { error: 'GEMINI_API_KEY non configurata.' },
         { status: 500 }
       );
     }
@@ -82,7 +88,9 @@ export async function POST(req: NextRequest) {
       ? allShots
           .map(
             (s) =>
-              `Shot #${s.shotNumber}${s.id === shot.id ? ' [THIS SHOT TO REGENERATE]' : ''}: Speaker=${s.speakerId || 'None'} | Dialogue="${s.dialogueIta}"`
+              `Shot #${s.shotNumber}${
+                s.id === shot.id ? ' [THIS SHOT TO REGENERATE]' : ''
+              }: Speaker=${s.speakerId || 'None'} | Dialogue="${s.dialogueIta}"`
           )
           .join('\n')
       : '';
@@ -111,32 +119,62 @@ ${contextText}
 
 Regenerate Shot #${shot.shotNumber} now as structured JSON.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: userPrompt,
-      config: {
-        systemInstruction,
-        responseMimeType: 'application/json',
-        responseSchema: singleShotSchema,
-        temperature: 0.85,
-      },
-    });
+    let lastError = '';
+    for (const modelName of GEMINI_MODELS) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: userPrompt,
+          config: {
+            systemInstruction,
+            responseMimeType: 'application/json',
+            responseSchema: singleShotSchema,
+            temperature: 0.85,
+          },
+        });
 
-    const parsed = JSON.parse(response.text?.trim() || '{}');
-    const validIds = new Set(activeChars.map((c) => c.id));
+        const parsed = JSON.parse(response.text?.trim() || '{}');
+        const validIds = new Set(activeChars.map((c) => c.id));
 
-    return NextResponse.json({
-      shot: {
-        ...shot,
-        cameraAngle: parsed.cameraAngle || shot.cameraAngle,
-        visualPromptEn: parsed.visualPromptEn || shot.visualPromptEn,
-        speakerId:
-          parsed.speakerId && validIds.has(parsed.speakerId)
-            ? parsed.speakerId
-            : activeChars[0]?.id || null,
-        dialogueIta: parsed.dialogueIta ?? shot.dialogueIta,
-      },
-    });
+        return NextResponse.json({
+          shot: {
+            ...shot,
+            cameraAngle: parsed.cameraAngle || shot.cameraAngle,
+            visualPromptEn: parsed.visualPromptEn || shot.visualPromptEn,
+            speakerId:
+              parsed.speakerId && validIds.has(parsed.speakerId)
+                ? parsed.speakerId
+                : activeChars[0]?.id || null,
+            dialogueIta: parsed.dialogueIta ?? shot.dialogueIta,
+          },
+        });
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err.message : String(err);
+        if (
+          lastError.includes('402') ||
+          lastError.includes('prepayment credits')
+        ) {
+          break;
+        }
+      }
+    }
+
+    if (lastError.includes('402') || lastError.includes('prepayment credits')) {
+      const speaker = activeChars[0];
+      return NextResponse.json({
+        shot: {
+          ...shot,
+          cameraAngle: 'Close-up reaction shot, dynamic handheld camera',
+          dialogueIta: `Aspettate un secondo... state dicendo sul serio o è uno scherzo?!`,
+          visualPromptEn: `Close-up reaction shot. [${speaker.name}: ${speaker.visualDescriptor}]. ${speaker.name} reacts with wide eyes and speaks animatedly to the camera.`,
+        },
+      });
+    }
+
+    return NextResponse.json(
+      { error: lastError || 'Errore durante la rigenerazione dello shot.' },
+      { status: 500 }
+    );
   } catch (error: unknown) {
     console.error('Errore in /api/regenerate-shot:', error);
     const message =
@@ -146,4 +184,3 @@ Regenerate Shot #${shot.shotNumber} now as structured JSON.`;
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
-

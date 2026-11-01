@@ -57,14 +57,81 @@ const scriptResponseSchema: Schema = {
   description: 'Ordered sequence of 5-second shots composing the episode.',
 };
 
+const GEMINI_SCRIPT_MODELS = [
+  'gemini-3.8-flash',
+  'gemini-3.5-flash',
+  'gemini-2.5-flash',
+];
+
+function buildFallbackShots(
+  cast: Character[],
+  shotCount: number,
+  title: string,
+  logline: string
+): Shot[] {
+  const angles = [
+    'Medium selfie shot, handheld camera',
+    'Close-up reaction shot, shallow depth of field',
+    'Two-shot over the shoulder, dynamic sitcom framing',
+    'Wide shot in room, expressive body language',
+    'Extreme close-up on eyes, comedic timing',
+    'Medium two-shot, final punchline reaction',
+  ];
+
+  return Array.from({ length: shotCount }, (_, idx) => {
+    const speaker = cast[idx % cast.length];
+    const secondChar = cast[(idx + 1) % cast.length];
+    const presentChars =
+      cast.length > 1 && idx % 2 === 1
+        ? [speaker.id, secondChar.id]
+        : [speaker.id];
+
+    const descriptors = presentChars
+      .map((id) => cast.find((c) => c.id === id))
+      .filter((c): c is Character => Boolean(c))
+      .map((c) => `[${c.name}: ${c.visualDescriptor}]`)
+      .join(' ');
+
+    const cameraAngle = angles[idx % angles.length];
+
+    let dialogueIta = '';
+    if (idx === 0) {
+      dialogueIta = `Ragazzi, parliamoci chiaro su "${title}": qui qualcuno sta nascondendo la verità!`;
+    } else if (idx === shotCount - 1) {
+      dialogueIta = `E va bene, lo ammetto... ma giuro che sembrava un'ottima idea sul momento!`;
+    } else {
+      dialogueIta = `Ma io che c'entro?! Guardate che ero qui solo di passaggio!`;
+    }
+
+    return {
+      id: `shot-${Date.now()}-${idx + 1}`,
+      shotNumber: idx + 1,
+      duration: 5,
+      characterIds: presentChars,
+      cameraAngle,
+      visualPromptEn: `${cameraAngle}. ${descriptors}. Scene context: ${logline.slice(0, 120)}. ${speaker.name} is speaking expressively to the camera with animated gestures.`,
+      speakerId: speaker.id,
+      dialogueIta,
+      status: 'draft',
+    };
+  });
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { title, logline, shotCount = 4, cast } = body as {
+    const {
+      title,
+      logline,
+      shotCount = 4,
+      cast,
+      customApiKey,
+    } = body as {
       title?: string;
       logline?: string;
       shotCount?: number;
       cast?: Character[];
+      customApiKey?: string;
     };
 
     if (!title || !logline || !Array.isArray(cast) || cast.length === 0) {
@@ -79,12 +146,12 @@ export async function POST(req: NextRequest) {
 
     const clampedShotCount = Math.min(6, Math.max(1, Number(shotCount) || 4));
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = customApiKey?.trim() || process.env.GEMINI_API_KEY;
     if (!apiKey || apiKey === 'la_tua_chiave_qui') {
       return NextResponse.json(
         {
           error:
-            'GEMINI_API_KEY non configurata. Imposta una chiave valida nel file .env.local.',
+            'GEMINI_API_KEY non configurata. Imposta una chiave valida.',
         },
         { status: 500 }
       );
@@ -123,45 +190,83 @@ ${castRosterText}
 
 Generate the structured JSON array of ${clampedShotCount} shots now.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: userPrompt,
-      config: {
-        systemInstruction,
-        responseMimeType: 'application/json',
-        responseSchema: scriptResponseSchema,
-        temperature: 0.75,
+    let lastError = '';
+    for (const modelName of GEMINI_SCRIPT_MODELS) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: userPrompt,
+          config: {
+            systemInstruction,
+            responseMimeType: 'application/json',
+            responseSchema: scriptResponseSchema,
+            temperature: 0.75,
+          },
+        });
+
+        const rawText = response.text?.trim() || '[]';
+        const parsedShots = JSON.parse(rawText) as Array<
+          Omit<Shot, 'id' | 'status'>
+        >;
+
+        const validCastIds = new Set(cast.map((c) => c.id));
+
+        const shots: Shot[] = parsedShots.map((s, index) => {
+          const filteredChars = Array.isArray(s.characterIds)
+            ? s.characterIds.filter((id) => validCastIds.has(id))
+            : [];
+          const ensuredChars =
+            filteredChars.length > 0 ? filteredChars : [cast[0].id];
+          const speakerId =
+            s.speakerId && validCastIds.has(s.speakerId) ? s.speakerId : null;
+
+          return {
+            id: `shot-${Date.now()}-${index + 1}`,
+            shotNumber: index + 1,
+            duration: 5,
+            characterIds: ensuredChars,
+            cameraAngle: s.cameraAngle || 'Medium selfie shot, handheld camera',
+            visualPromptEn: s.visualPromptEn || '',
+            speakerId,
+            dialogueIta: s.dialogueIta || '',
+            status: 'draft',
+          };
+        });
+
+        return NextResponse.json({ shots, modelUsed: modelName });
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err.message : String(err);
+        if (
+          lastError.includes('402') ||
+          lastError.includes('prepayment credits')
+        ) {
+          break;
+        }
+      }
+    }
+
+    if (lastError.includes('402') || lastError.includes('prepayment credits')) {
+      const fallbackShots = buildFallbackShots(
+        cast,
+        clampedShotCount,
+        title,
+        logline
+      );
+      return NextResponse.json({
+        shots: fallbackShots,
+        warning:
+          'Sceneggiatura generata in modalità Studio Template perché la chiave Google AI Studio attuale ha "Prepayment credits depleted" (402). Puoi modificare liberamente tutte le battute nello Storyboard!',
+      });
+    }
+
+    return NextResponse.json(
+      {
+        error:
+          lastError ||
+          'Errore imprevisto durante la generazione della sceneggiatura.',
       },
-    });
-
-    const rawText = response.text?.trim() || '[]';
-    const parsedShots = JSON.parse(rawText) as Array<Omit<Shot, 'id' | 'status'>>;
-
-    const validCastIds = new Set(cast.map((c) => c.id));
-
-    const shots: Shot[] = parsedShots.map((s, index) => {
-      const filteredChars = Array.isArray(s.characterIds)
-        ? s.characterIds.filter((id) => validCastIds.has(id))
-        : [];
-      const ensuredChars =
-        filteredChars.length > 0 ? filteredChars : [cast[0].id];
-      const speakerId =
-        s.speakerId && validCastIds.has(s.speakerId) ? s.speakerId : null;
-
-      return {
-        id: `shot-${Date.now()}-${index + 1}`,
-        shotNumber: index + 1,
-        duration: 5,
-        characterIds: ensuredChars,
-        cameraAngle: s.cameraAngle || 'Medium selfie shot, handheld camera',
-        visualPromptEn: s.visualPromptEn || '',
-        speakerId,
-        dialogueIta: s.dialogueIta || '',
-        status: 'draft',
-      };
-    });
-
-    return NextResponse.json({ shots });
+      { status: 500 }
+    );
   } catch (error: unknown) {
     console.error('Errore in /api/generate-script:', error);
     const message =
@@ -171,4 +276,3 @@ Generate the structured JSON array of ${clampedShotCount} shots now.`;
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
-
