@@ -1,0 +1,17 @@
+{
+  "cast": [],
+  "series": [
+    {
+      "id": "series-default-1",
+      "title": "Serie Principale",
+      "description": "Sitcom social in formato verticale per Reels e TikTok",
+      "genre": "Sitcom brillante",
+      "defaultAspectRatio": "9:16",
+      "castIds": [],
+      "createdAt": "2026-11-01T11:26:25.824Z",
+      "updatedAt": "2026-11-01T11:26:25.824Z"
+    }
+  ],
+  "episodes": [],
+  "updatedAt": "2026-11-01T11:26:25.824Z"
+}
