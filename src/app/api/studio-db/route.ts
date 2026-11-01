@@ -1,25 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import path from 'path';
-import type { StudioDatabasePayload, Episode } from '@/types/episodia';
+import type { StudioDatabasePayload, Episode, Series } from '@/types/episodia';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const DB_FILE_PATH = path.join(DATA_DIR, 'episodia-db.json');
 
 const DEFAULT_DB: StudioDatabasePayload = {
   cast: [],
-  series: [
-    {
-      id: 'series-default-1',
-      title: 'Serie Principale',
-      description: 'Sitcom social in formato verticale per Reels e TikTok',
-      genre: 'Sitcom brillante',
-      defaultAspectRatio: '9:16',
-      castIds: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    },
-  ],
+  series: [],
   episodes: [],
   updatedAt: new Date().toISOString(),
 };
@@ -40,6 +29,35 @@ function stripHeavyGeneratedMedia(episodes: Episode[]): Episode[] {
   }));
 }
 
+function stripHeavySeriesIntroMedia(seriesList: Series[]): Series[] {
+  return seriesList.map((s) => {
+    if (!s.intro) return s;
+    const cleanIntro = { ...s.intro };
+    if (
+      cleanIntro.introVideoUrl &&
+      (cleanIntro.introVideoUrl.startsWith('data:video') ||
+        cleanIntro.introVideoUrl.startsWith('blob:'))
+    ) {
+      delete cleanIntro.introVideoUrl;
+    }
+    cleanIntro.shots = (cleanIntro.shots || []).map((shot) => {
+      const cleanShot = { ...shot };
+      if (
+        cleanShot.videoUrl &&
+        (cleanShot.videoUrl.startsWith('data:video') ||
+          cleanShot.videoUrl.startsWith('blob:'))
+      ) {
+        delete cleanShot.videoUrl;
+      }
+      return cleanShot;
+    });
+    return {
+      ...s,
+      intro: cleanIntro,
+    };
+  });
+}
+
 async function readLocalServerDb(): Promise<StudioDatabasePayload> {
   try {
     await fs.mkdir(DATA_DIR, { recursive: true });
@@ -47,10 +65,7 @@ async function readLocalServerDb(): Promise<StudioDatabasePayload> {
     const parsed = JSON.parse(raw) as StudioDatabasePayload;
     return {
       cast: Array.isArray(parsed.cast) ? parsed.cast : [],
-      series:
-        Array.isArray(parsed.series) && parsed.series.length > 0
-          ? parsed.series
-          : DEFAULT_DB.series,
+      series: Array.isArray(parsed.series) ? parsed.series : [],
       episodes: Array.isArray(parsed.episodes) ? parsed.episodes : [],
       updatedAt: parsed.updatedAt || new Date().toISOString(),
     };
@@ -107,7 +122,6 @@ export async function GET(req: NextRequest) {
   try {
     const { url, key, isSupabase } = resolveCloudCredentials(req);
 
-    // 1. Se Supabase è configurato, leggi dalla tabella `episodia_state`
     if (url && isSupabase && key) {
       try {
         const baseUrl = url.replace(/\/+$/, '');
@@ -128,10 +142,7 @@ export async function GET(req: NextRequest) {
             const p = rows[0].payload as Partial<StudioDatabasePayload>;
             const merged: StudioDatabasePayload = {
               cast: Array.isArray(p.cast) ? p.cast : [],
-              series:
-                Array.isArray(p.series) && p.series.length > 0
-                  ? p.series
-                  : DEFAULT_DB.series,
+              series: Array.isArray(p.series) ? p.series : [],
               episodes: Array.isArray(p.episodes) ? p.episodes : [],
               updatedAt:
                 rows[0].updated_at || p.updatedAt || new Date().toISOString(),
@@ -142,7 +153,6 @@ export async function GET(req: NextRequest) {
               source: 'supabase-cloud',
             });
           }
-          // Tabella esistente ma ancora vuota
           const localDb = await readLocalServerDb();
           return NextResponse.json({
             ...localDb,
@@ -154,7 +164,6 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // 2. Endpoint REST generico (es. Firebase Realtime DB / JSONBin)
     if (url && !isSupabase) {
       try {
         const headers: Record<string, string> = { Accept: 'application/json' };
@@ -171,10 +180,7 @@ export async function GET(req: NextRequest) {
           if (record && (Array.isArray(record.cast) || Array.isArray(record.series))) {
             const merged: StudioDatabasePayload = {
               cast: record.cast || [],
-              series:
-                record.series && record.series.length > 0
-                  ? record.series
-                  : DEFAULT_DB.series,
+              series: Array.isArray(record.series) ? record.series : [],
               episodes: record.episodes || [],
               updatedAt: record.updatedAt || new Date().toISOString(),
             };
@@ -211,10 +217,9 @@ export async function POST(req: NextRequest) {
 
     const updatedPayload: StudioDatabasePayload = {
       cast: Array.isArray(body.cast) ? body.cast : currentDb.cast,
-      series:
-        Array.isArray(body.series) && body.series.length > 0
-          ? body.series
-          : currentDb.series,
+      series: Array.isArray(body.series)
+        ? stripHeavySeriesIntroMedia(body.series)
+        : currentDb.series,
       episodes: Array.isArray(body.episodes)
         ? stripHeavyGeneratedMedia(body.episodes)
         : currentDb.episodes,

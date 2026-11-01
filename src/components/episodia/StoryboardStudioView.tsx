@@ -24,13 +24,16 @@ import {
   Users,
   Check,
   Loader2,
+  Music,
+  FileVideo,
+  X,
 } from 'lucide-react';
 import type { Character, Series, Episode, Shot } from '@/types/episodia';
 import { saveLocalGeneratedVideo } from '@/lib/storage';
 
 interface StoryboardStudioViewProps {
   seriesList: Series[];
-  activeSeries: Series;
+  activeSeries: Series | null;
   episodes: Episode[];
   activeEpisode: Episode | null;
   cast: Character[];
@@ -38,6 +41,7 @@ interface StoryboardStudioViewProps {
   onSelectEpisode: (episodeId: string) => void;
   onUpdateEpisode: (updatedEpisode: Episode) => Promise<void>;
   onGoToWritersRoom: () => void;
+  onGoToSeriesHub: () => void;
 }
 
 const CAMERA_PRESETS = [
@@ -64,9 +68,10 @@ export default function StoryboardStudioView({
   onSelectEpisode,
   onUpdateEpisode,
   onGoToWritersRoom,
+  onGoToSeriesHub,
 }: StoryboardStudioViewProps) {
   const [aspectRatio, setAspectRatio] = useState<'9:16' | '16:9'>(
-    activeSeries.defaultAspectRatio || '9:16'
+    activeSeries?.defaultAspectRatio || '9:16'
   );
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [step2NoticeShotId, setStep2NoticeShotId] = useState<string | null>(
@@ -77,6 +82,32 @@ export default function StoryboardStudioView({
   );
   const [isRegeneratingWholeEpisode, setIsRegeneratingWholeEpisode] =
     useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [currentPlaylistIdx, setCurrentPlaylistIdx] = useState(0);
+
+  if (!activeSeries || seriesList.length === 0) {
+    return (
+      <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-12 text-center max-w-2xl mx-auto my-8">
+        <div className="w-16 h-16 rounded-2xl bg-violet-600/20 border border-violet-500/40 flex items-center justify-center mx-auto mb-4 text-violet-400">
+          <Tv className="w-8 h-8" />
+        </div>
+        <h2 className="text-xl font-bold text-zinc-100 mb-2">
+          Crea la tua prima serie
+        </h2>
+        <p className="text-sm text-zinc-400 mb-6 leading-relaxed">
+          Non hai ancora nessuna serie attiva. Crea prima una serie TV per configurare la sigla e gli episodi.
+        </p>
+        <button
+          type="button"
+          onClick={onGoToSeriesHub}
+          className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-sm font-bold shadow-lg transition"
+        >
+          <Plus className="w-4 h-4" />
+          Crea la tua prima serie
+        </button>
+      </div>
+    );
+  }
 
   const seriesEpisodes = episodes.filter(
     (ep) => ep.seriesId === activeSeries.id
@@ -110,6 +141,20 @@ export default function StoryboardStudioView({
 
   const castMap = new Map<string, Character>(cast.map((c) => [c.id, c]));
 
+  const hasActiveIntro = Boolean(
+    activeSeries.intro &&
+      activeSeries.intro.enabled &&
+      (activeSeries.intro.shots.length > 0 ||
+        Boolean(activeSeries.intro.introVideoUrl))
+  );
+
+  const introDurationOffset = hasActiveIntro
+    ? Math.min(15, activeSeries.intro?.durationSeconds || 15)
+    : 0;
+
+  const totalEpisodeDurationWithIntro =
+    introDurationOffset + activeEpisode.shots.length * 5;
+
   const markSaved = () => {
     setLastSavedAt(
       new Date().toLocaleTimeString('it-IT', {
@@ -120,7 +165,6 @@ export default function StoryboardStudioView({
     );
   };
 
-  // Aggiorna Titolo, Trama o Cast dell'episodio salvando subito sul Server anche senza salvare file video
   const handleEpisodeMetadataChange = async (patch: Partial<Episode>) => {
     const updatedEpisode: Episode = {
       ...activeEpisode,
@@ -150,7 +194,6 @@ export default function StoryboardStudioView({
     markSaved();
   };
 
-  // Rigenera un singolo Shot tramite Gemini (/api/regenerate-shot)
   const handleRegenerateSingleShot = async (shot: Shot) => {
     setRegeneratingShotId(shot.id);
     try {
@@ -181,7 +224,6 @@ export default function StoryboardStudioView({
     }
   };
 
-  // Rigenera l'intera sceneggiatura dell'episodio mantenendo Titolo, Trama e Cast
   const handleRegenerateWholeEpisode = async () => {
     const epCast = cast.filter((c) =>
       activeEpisode.selectedCastIds.includes(c.id)
@@ -235,6 +277,60 @@ export default function StoryboardStudioView({
     a.click();
   };
 
+  // Costruisce la timeline completa di esportazione con la Sigla (max 15s) in testa + gli Shot dell'episodio
+  const handleExportCompleteEpisodePackage = () => {
+    const exportTimeline = {
+      seriesTitle: activeSeries.title,
+      episodeNumber: activeEpisode.episodeNumber,
+      episodeTitle: activeEpisode.title,
+      logline: activeEpisode.logline,
+      aspectRatio,
+      prependedIntro: hasActiveIntro
+        ? {
+            includedInHead: true,
+            maxDurationSeconds: introDurationOffset,
+            timecode: `00:00 - 00:${String(introDurationOffset).padStart(2, '0')}`,
+            concept: activeSeries.intro?.concept,
+            hasMasterIntroVideo: Boolean(activeSeries.intro?.introVideoUrl),
+            introShots: activeSeries.intro?.shots || [],
+          }
+        : null,
+      episodeShots: activeEpisode.shots.map((s) => ({
+        ...s,
+        startTimeSeconds: introDurationOffset + (s.shotNumber - 1) * 5,
+        endTimeSeconds: introDurationOffset + s.shotNumber * 5,
+      })),
+      totalDurationSeconds: totalEpisodeDurationWithIntro,
+      exportedAt: new Date().toISOString(),
+    };
+
+    const blob = new Blob([JSON.stringify(exportTimeline, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_Master_Con_Sigla.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    // Se sono presenti anche clip video (Sigla in testa + Shot), scarica in sequenza partendo dalla Sigla!
+    if (hasActiveIntro && activeSeries.intro?.introVideoUrl) {
+      const introLink = document.createElement('a');
+      introLink.href = activeSeries.intro.introVideoUrl;
+      introLink.download = `00_SIGLA_IN_TESTA_${introDurationOffset}s_${activeSeries.title.replace(/\s+/g, '_')}.mp4`;
+      introLink.click();
+    }
+    activeEpisode.shots.forEach((shot) => {
+      if (shot.videoUrl) {
+        const shotLink = document.createElement('a');
+        shotLink.href = shot.videoUrl;
+        shotLink.download = `${String(shot.shotNumber).padStart(2, '0')}_Shot_${shot.shotNumber}_Ep${activeEpisode.episodeNumber}.mp4`;
+        shotLink.click();
+      }
+    });
+  };
+
   const toggleCharInShot = async (shot: Shot, charId: string) => {
     const exists = shot.characterIds.includes(charId);
     let nextIds: string[];
@@ -271,9 +367,32 @@ export default function StoryboardStudioView({
     await handleShotChange(shot.id, { visualPromptEn: updatedPrompt });
   };
 
+  // Playlist per il Player Master (Sigla 15s in testa + Shot episodio)
+  const playableClips: Array<{
+    label: string;
+    videoUrl: string;
+    subtitle: string;
+  }> = [];
+  if (hasActiveIntro && activeSeries.intro?.introVideoUrl) {
+    playableClips.push({
+      label: `SIGLA IN TESTA (0s - ${introDurationOffset}s)`,
+      videoUrl: activeSeries.intro.introVideoUrl,
+      subtitle: activeSeries.intro.concept || `Sigla ${activeSeries.title}`,
+    });
+  }
+  activeEpisode.shots.forEach((s) => {
+    if (s.videoUrl) {
+      playableClips.push({
+        label: `SHOT #${s.shotNumber} (${introDurationOffset + (s.shotNumber - 1) * 5}s - ${introDurationOffset + s.shotNumber * 5}s)`,
+        videoUrl: s.videoUrl,
+        subtitle: s.dialogueIta,
+      });
+    }
+  });
+
   return (
     <div className="space-y-6">
-      {/* SCHEDA METADATI PUNTATA (TITOLO, TRAMA E CAST SEMPRE SALVATI ANCHE SENZA FILE VIDEO) */}
+      {/* SCHEDA METADATI PUNTATA + PULSANTE ESPORTAZIONE CON SIGLA IN TESTA */}
       <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-6 shadow-2xl space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-zinc-800">
           <div className="flex flex-wrap items-center gap-3">
@@ -310,11 +429,29 @@ export default function StoryboardStudioView({
 
             <span className="px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
               <Clock className="w-3 h-3" />
-              {activeEpisode.shots.length * 5}s Totali
+              {totalEpisodeDurationWithIntro}s Totali
+              {hasActiveIntro
+                ? ` (${introDurationOffset}s Sigla + ${activeEpisode.shots.length * 5}s Puntata)`
+                : ''}
             </span>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
+            {/* PULSANTE ESPORTA VIDEO / PUNTATA CON SIGLA IN TESTA */}
+            <button
+              type="button"
+              onClick={() => {
+                setCurrentPlaylistIdx(0);
+                setShowExportModal(true);
+              }}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold shadow-lg transition"
+            >
+              <FileVideo className="w-4 h-4" />
+              {hasActiveIntro
+                ? `Esporta Video (con Sigla ${introDurationOffset}s in Testa)`
+                : 'Esporta Puntata'}
+            </button>
+
             {/* PULSANTE RIGENERA INTERO EPISODIO */}
             <button
               type="button"
@@ -325,24 +462,15 @@ export default function StoryboardStudioView({
               {isRegeneratingWholeEpisode ? (
                 <>
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  Rigenerazione Episodio...
+                  Rigenerazione...
                 </>
               ) : (
                 <>
                   <RefreshCw className="w-3.5 h-3.5" />
-                  Rigenera Intero Episodio (AI)
+                  Rigenera Episodio (AI)
                 </>
               )}
             </button>
-
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-950/50 border border-emerald-800/60 text-emerald-300 text-xs">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-              <span>
-                {lastSavedAt
-                  ? `Titolo, Trama e Shot salvati (${lastSavedAt})`
-                  : 'Titolo, Trama e Cast salvati su Server'}
-              </span>
-            </div>
 
             <div className="inline-flex rounded-xl bg-zinc-950 p-1 border border-zinc-800">
               <button
@@ -404,9 +532,16 @@ export default function StoryboardStudioView({
           </div>
 
           <div className="lg:col-span-3">
-            <label className="flex items-center gap-1 text-[11px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
-              <Users className="w-3.5 h-3.5 text-violet-400" />
-              Personaggi della Puntata
+            <label className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+              <span className="flex items-center gap-1">
+                <Users className="w-3.5 h-3.5 text-violet-400" />
+                Personaggi Puntata
+              </span>
+              {lastSavedAt && (
+                <span className="text-[10px] text-emerald-400 font-normal">
+                  Salvato {lastSavedAt}
+                </span>
+              )}
             </label>
             <div className="flex flex-wrap gap-1.5">
               {cast.map((c) => {
@@ -437,6 +572,145 @@ export default function StoryboardStudioView({
         </div>
       </div>
 
+      {/* MODALE ESPORTAZIONE MASTER CON SIGLA IN TESTA (0s - 15s) */}
+      {showExportModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-5">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+              <div className="flex items-center gap-2.5">
+                <FileVideo className="w-5 h-5 text-emerald-400" />
+                <div>
+                  <h3 className="text-base font-bold text-white">
+                    Esportazione Master — {activeSeries.title} (Ep. #{activeEpisode.episodeNumber})
+                  </h3>
+                  <p className="text-xs text-zinc-400">
+                    {hasActiveIntro
+                      ? `Include automaticamente in testa i primi ${introDurationOffset} secondi della Sigla Ufficiale della Serie`
+                      : 'Esportazione sequenza episodio'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowExportModal(false)}
+                className="p-1 text-zinc-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* RIEPILOGO TIMELINE DI ESPORTAZIONE */}
+            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+              {hasActiveIntro && (
+                <div className="p-3 rounded-xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <Music className="w-4 h-4 text-amber-400" />
+                    <div>
+                      <span className="text-xs font-black text-amber-300 uppercase block">
+                        IN TESTA (0s – {introDurationOffset}s): SIGLA SERIE &quot;{activeSeries.title}&quot;
+                      </span>
+                      <span className="text-[11px] text-zinc-300">
+                        {activeSeries.intro?.shots.length || 0} shot sigla •{' '}
+                        {activeSeries.intro?.introVideoUrl
+                          ? 'Video Sigla MP4 collegato'
+                          : 'Storyboard Sigla pronto'}
+                      </span>
+                    </div>
+                  </div>
+                  <span className="text-xs font-mono font-bold text-amber-300">
+                    {introDurationOffset}s
+                  </span>
+                </div>
+              )}
+
+              {activeEpisode.shots.map((s) => (
+                <div
+                  key={s.id}
+                  className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-between"
+                >
+                  <div>
+                    <span className="text-xs font-bold text-violet-300">
+                      SHOT #{s.shotNumber} (
+                      {introDurationOffset + (s.shotNumber - 1) * 5}s –{' '}
+                      {introDurationOffset + s.shotNumber * 5}s)
+                    </span>
+                    <p className="text-[11px] text-zinc-400 truncate max-w-md">
+                      {s.dialogueIta || s.cameraAngle}
+                    </p>
+                  </div>
+                  <span className="text-xs font-mono text-zinc-400">5s</span>
+                </div>
+              ))}
+            </div>
+
+            {/* PLAYER SEQUENZIALE SE CI SONO CLIP VIDEO CARICATE */}
+            {playableClips.length > 0 && (
+              <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-2 text-center">
+                <span className="text-xs font-bold text-emerald-400 block">
+                  Anteprima Riproduzione Continua ({playableClips[currentPlaylistIdx]?.label})
+                </span>
+                <video
+                  key={playableClips[currentPlaylistIdx]?.videoUrl}
+                  src={playableClips[currentPlaylistIdx]?.videoUrl}
+                  controls
+                  autoPlay
+                  onEnded={() => {
+                    if (currentPlaylistIdx < playableClips.length - 1) {
+                      setCurrentPlaylistIdx(currentPlaylistIdx + 1);
+                    }
+                  }}
+                  className="w-full max-h-60 rounded-lg bg-black mx-auto"
+                />
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={handleExportCompleteEpisodePackage}
+                className="w-full py-3.5 px-5 rounded-xl bg-gradient-to-r from-emerald-500 to-amber-500 hover:from-emerald-400 hover:to-amber-400 text-zinc-950 font-black text-xs uppercase tracking-wider shadow-lg flex items-center justify-center gap-2 transition"
+              >
+                <Download className="w-4 h-4" />
+                Scarica Esportazione Completa (Sigla {introDurationOffset}s in Testa + Puntata)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* BLOCCO IN TESTA ALLA SEQUENZA: SIGLA DELLA SERIE (SE PRESENTE E ATTIVA) */}
+      {hasActiveIntro && (
+        <div className="bg-gradient-to-r from-amber-950/40 via-zinc-900 to-violet-950/40 border-2 border-amber-500/50 rounded-2xl p-5 shadow-xl flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3.5">
+            <div className="w-11 h-11 rounded-xl bg-amber-500 text-zinc-950 flex items-center justify-center font-black shadow-lg">
+              <Music className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-0.5 rounded-md bg-amber-500 text-zinc-950 text-[10px] font-black uppercase">
+                  IN TESTA AL VIDEO • 0s – {introDurationOffset}s
+                </span>
+                <h3 className="text-sm font-bold text-white">
+                  Sigla Ufficiale &quot;{activeSeries.title}&quot; ({introDurationOffset} secondi max)
+                </h3>
+              </div>
+              <p className="text-xs text-zinc-300 mt-1">
+                Questa sigla viene anteposta automaticamente nei primi{' '}
+                <strong>{introDurationOffset} secondi</strong> ad ogni video generato ed esportato di questa serie.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onGoToSeriesHub}
+            className="px-3.5 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-amber-500/40 text-xs font-bold text-amber-300 transition"
+          >
+            Modifica Sigla in Gestione Serie →
+          </button>
+        </div>
+      )}
+
       {/* SEQUENZA DI CARD NUMERATE (SHOT 1, SHOT 2, SHOT 3...) */}
       <div className="space-y-6">
         {activeEpisode.shots.map((shot) => {
@@ -451,6 +725,9 @@ export default function StoryboardStudioView({
             .filter((c): c is Character => Boolean(c));
           const isRegeneratingThisShot = regeneratingShotId === shot.id;
 
+          const startSec = introDurationOffset + (shot.shotNumber - 1) * 5;
+          const endSec = introDurationOffset + shot.shotNumber * 5;
+
           return (
             <div
               key={shot.id}
@@ -463,8 +740,7 @@ export default function StoryboardStudioView({
                     SHOT #{shot.shotNumber}
                   </span>
                   <span className="text-xs font-mono text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2.5 py-0.5 rounded-md">
-                    {(shot.shotNumber - 1) * 5}s – {shot.shotNumber * 5}s (
-                    {shot.duration}s)
+                    {startSec}s – {endSec}s ({shot.duration}s)
                   </span>
                   <span className="text-xs text-zinc-400 hidden sm:inline">
                     • {shot.cameraAngle}
@@ -472,13 +748,11 @@ export default function StoryboardStudioView({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  {/* PULSANTE RIGENERA QUESTO SINGOLO SHOT CON AI */}
                   <button
                     type="button"
                     disabled={isRegeneratingThisShot}
                     onClick={() => handleRegenerateSingleShot(shot)}
                     className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-violet-600/25 hover:bg-violet-600 text-violet-200 hover:text-white border border-violet-500/40 text-xs font-bold transition disabled:opacity-50"
-                    title="Rigenera battuta, inquadratura e prompt visivo di questo singolo Shot con Gemini"
                   >
                     <RefreshCw
                       className={`w-3.5 h-3.5 ${
@@ -516,7 +790,6 @@ export default function StoryboardStudioView({
               <div className="p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
                 {/* COLONNA SINISTRA (8 COL) */}
                 <div className="lg:col-span-8 space-y-5">
-                  {/* AVATAR DEI PERSONAGGI NELLO SHOT & SELETTORE SPEAKER */}
                   <div className="p-4 rounded-xl bg-zinc-950/70 border border-zinc-800/80 space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
@@ -626,7 +899,7 @@ export default function StoryboardStudioView({
                     </div>
                   </div>
 
-                  {/* BATTUTA IN ITALIANO (dialogueIta) */}
+                  {/* BATTUTA IN ITALIANO */}
                   <div>
                     <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
                       <label className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-300">
@@ -756,7 +1029,6 @@ export default function StoryboardStudioView({
                       </span>
                     </div>
 
-                    {/* MONITOR FRAME 9:16 O 16:9 */}
                     <div
                       className={`relative w-full overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 shadow-inner flex flex-col justify-between ${
                         aspectRatio === '9:16'
@@ -798,7 +1070,6 @@ export default function StoryboardStudioView({
 
                           <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-black/50" />
 
-                          {/* Top HUD Overlay */}
                           <div className="relative z-10 p-2.5 flex items-center justify-between text-[10px] font-mono text-zinc-200">
                             <span className="px-1.5 py-0.5 rounded bg-black/60 border border-white/10">
                               CAM {shot.shotNumber}
@@ -808,7 +1079,6 @@ export default function StoryboardStudioView({
                             </span>
                           </div>
 
-                          {/* Center Play / Preview Badge */}
                           <div className="relative z-10 flex flex-col items-center justify-center px-3 text-center">
                             <div className="w-11 h-11 rounded-full bg-zinc-950/80 border border-violet-500/60 flex items-center justify-center text-violet-400 shadow-lg mb-1.5">
                               <Play className="w-5 h-5 fill-current ml-0.5" />
@@ -818,7 +1088,6 @@ export default function StoryboardStudioView({
                             </span>
                           </div>
 
-                          {/* Bottom Subtitle Overlay */}
                           <div className="relative z-10 p-3 text-center">
                             {shot.dialogueIta ? (
                               <div className="bg-black/75 backdrop-blur-sm border border-white/10 rounded-lg px-2.5 py-1.5">
@@ -841,7 +1110,6 @@ export default function StoryboardStudioView({
                       )}
                     </div>
 
-                    {/* PULSANTE GENERA / RIGENERA CLIP (PASSO 2) + SALVATAGGIO / CARICAMENTO VIDEO LOCALE */}
                     <button
                       type="button"
                       onClick={() =>
@@ -885,8 +1153,7 @@ export default function StoryboardStudioView({
 
                     {step2NoticeShotId === shot.id && (
                       <div className="mt-2.5 p-2.5 rounded-lg bg-violet-950/60 border border-violet-500/40 text-[11px] text-violet-200 text-center leading-relaxed">
-                        Pronto per il <strong>Passo 2</strong>: il video generato verrà salvato{' '}
-                        <strong>esclusivamente in locale</strong> (<code className="text-amber-300">episodia_local_media</code> + download MP4 su disco) mentre Titolo, Trama, Personaggi e Prompt sono già salvati sul Server.
+                        Pronto per il <strong>Passo 2</strong>: in fase di esportazione finale verrà aggiunto automaticamente in testa il blocco <strong>Sigla ({introDurationOffset}s)</strong> seguito da questa clip!
                       </div>
                     )}
                   </div>

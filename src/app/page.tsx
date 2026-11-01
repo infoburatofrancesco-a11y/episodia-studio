@@ -15,6 +15,7 @@ import {
   X,
   QrCode,
   ExternalLink,
+  Plus,
 } from 'lucide-react';
 import type {
   Character,
@@ -57,7 +58,9 @@ export default function EpisodiaStudioPage() {
   const [syncStatus, setSyncStatus] = useState<string>('Connesso al Server');
   const [isLoadingStorage, setIsLoadingStorage] = useState(true);
   const [showRemoteModal, setShowRemoteModal] = useState(false);
-  const [publicTunnelUrl, setPublicTunnelUrl] = useState('');
+  const [publicTunnelUrl, setPublicTunnelUrl] = useState(
+    'https://episodia-studio-business-finders.vercel.app'
+  );
 
   useEffect(() => {
     async function loadStudioData() {
@@ -98,22 +101,12 @@ export default function EpisodiaStudioPage() {
     loadStudioData();
   }, []);
 
-  const activeSeries: Series =
-    seriesList.find((s) => s.id === activeSeriesId) ||
-    seriesList[0] || {
-      id: 'series-default-1',
-      title: 'Serie Principale',
-      description: 'Sitcom social in formato verticale per Reels e TikTok',
-      genre: 'Sitcom brillante',
-      defaultAspectRatio: '9:16',
-      castIds: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+  const activeSeries: Series | null =
+    seriesList.find((s) => s.id === activeSeriesId) || seriesList[0] || null;
 
-  const activeSeriesEpisodes = episodes.filter(
-    (ep) => ep.seriesId === activeSeries.id
-  );
+  const activeSeriesEpisodes = activeSeries
+    ? episodes.filter((ep) => ep.seriesId === activeSeries.id)
+    : [];
 
   const activeEpisode =
     activeSeriesEpisodes.find((ep) => ep.id === activeEpisodeId) ||
@@ -124,13 +117,13 @@ export default function EpisodiaStudioPage() {
   const handleSaveCharacter = async (character: Character) => {
     const updated = await saveCharacter(character);
     setCast(updated);
-    setSyncStatus('Salvato su Server & IndexedDB');
+    setSyncStatus('Salvato su Supabase & IndexedDB');
   };
 
   const handleDeleteCharacter = async (id: string) => {
     const updated = await deleteCharacter(id);
     setCast(updated);
-    setSyncStatus('Salvato su Server & IndexedDB');
+    setSyncStatus('Salvato su Supabase & IndexedDB');
   };
 
   // Handlers Serie TV in parallelo
@@ -143,7 +136,10 @@ export default function EpisodiaStudioPage() {
   const handleSaveSeries = async (seriesItem: Series) => {
     const updated = await saveSeries(seriesItem);
     setSeriesList(updated);
-    setSyncStatus('Bozza & Serie salvate su Server');
+    if (!activeSeriesId) {
+      setActiveSeriesId(seriesItem.id);
+    }
+    setSyncStatus('Serie & Sigla salvate su Supabase');
   };
 
   const handleDeleteSeries = async (seriesId: string) => {
@@ -153,8 +149,9 @@ export default function EpisodiaStudioPage() {
     setEpisodes(updatedEpisodes);
     if (activeSeriesId === seriesId) {
       setActiveSeriesId(updatedSeries[0]?.id || '');
+      setActiveEpisodeId(null);
     }
-    setSyncStatus('Serie aggiornata su Server');
+    setSyncStatus('Serie rimossa da Supabase');
   };
 
   // Handlers Episodi
@@ -163,26 +160,26 @@ export default function EpisodiaStudioPage() {
     setEpisodes(updated);
     setActiveSeriesId(episode.seriesId);
     setActiveEpisodeId(episode.id);
-    setSyncStatus('Puntata salvata su Server');
+    setSyncStatus('Puntata salvata su Supabase');
     setActiveTab('storyboard');
   };
 
   const handleUpdateEpisode = async (episode: Episode) => {
     const updated = await saveEpisode(episode);
     setEpisodes(updated);
-    setSyncStatus('Puntata aggiornata su Server');
+    setSyncStatus('Puntata aggiornata su Supabase');
   };
 
   const handleDeleteEpisode = async (episodeId: string) => {
     const updated = await deleteEpisode(episodeId);
     setEpisodes(updated);
-    if (activeEpisodeId === episodeId) {
+    if (activeEpisodeId === episodeId && activeSeries) {
       const remainingInSeries = updated.filter(
         (ep) => ep.seriesId === activeSeries.id
       );
       setActiveEpisodeId(remainingInSeries[0]?.id ?? null);
     }
-    setSyncStatus('Episodio rimosso dal Server');
+    setSyncStatus('Episodio rimosso da Supabase');
   };
 
   const handleForceServerSync = async () => {
@@ -193,7 +190,7 @@ export default function EpisodiaStudioPage() {
     setEpisodes(pulled.episodes);
     setSyncStatus(
       res.cloudSynced
-        ? 'Sincronizzato Server + Cloud Remoto'
+        ? 'Sincronizzato Supabase Cloud'
         : 'Sincronizzato col Server'
     );
   };
@@ -214,10 +211,8 @@ export default function EpisodiaStudioPage() {
     setCast(payload.cast);
     setSeriesList(payload.series);
     setEpisodes(payload.episodes);
-    if (payload.series[0]) {
-      setActiveSeriesId(payload.series[0].id);
-    }
-    setSyncStatus('Database importato e sincronizzato su Server');
+    setActiveSeriesId(payload.series[0]?.id || '');
+    setSyncStatus('Database importato e sincronizzato su Supabase');
   };
 
   const navItems: Array<{
@@ -236,22 +231,24 @@ export default function EpisodiaStudioPage() {
     },
     {
       id: 'series',
-      label: '2. Serie TV in Parallelo',
-      sublabel: 'Gestione multi-serie & Cloud Sync',
+      label: '2. Serie TV & Sigla (15s)',
+      sublabel: 'Multi-serie, Sigla & Cloud Sync',
       icon: FolderKanban,
       badge: seriesList.length,
     },
     {
       id: 'writers-room',
       label: "3. Writer's Room",
-      sublabel: `Sceneggiatura: ${activeSeries.title}`,
+      sublabel: activeSeries
+        ? `Sceneggiatura: ${activeSeries.title}`
+        : 'Crea prima una serie',
       icon: Clapperboard,
       badge: activeSeriesEpisodes.length,
     },
     {
       id: 'storyboard',
       label: '4. Storyboard & Studio',
-      sublabel: 'Editor 5s & Video Locali',
+      sublabel: 'Editor 5s & Esportazione con Sigla',
       icon: Film,
       badge: activeEpisode ? activeEpisode.shots.length : undefined,
     },
@@ -278,7 +275,7 @@ export default function EpisodiaStudioPage() {
 
         {/* SELETTORE RAPIDO SERIE ATTIVA + ACCESSO REMOTO OVUNQUE + STATO SERVER */}
         <div className="flex flex-wrap items-center gap-3 text-xs">
-          {seriesList.length > 0 && (
+          {seriesList.length > 0 && activeSeries ? (
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-900 border border-violet-500/40">
               <Tv className="w-3.5 h-3.5 text-amber-400" />
               <span className="text-zinc-400">Serie Attiva:</span>
@@ -294,6 +291,15 @@ export default function EpisodiaStudioPage() {
                 ))}
               </select>
             </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setActiveTab('series')}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Crea la tua prima serie
+            </button>
           )}
 
           <button
@@ -302,7 +308,7 @@ export default function EpisodiaStudioPage() {
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-violet-600/25 hover:bg-violet-600/40 border border-violet-500/50 text-violet-200 font-semibold transition"
           >
             <Globe className="w-3.5 h-3.5 text-amber-400" />
-            <span>Accesso da Telefono / Altri PC (4G/5G)</span>
+            <span>QR &amp; Link Online</span>
           </button>
 
           <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-900/90 border border-zinc-800 text-zinc-300">
@@ -318,7 +324,7 @@ export default function EpisodiaStudioPage() {
         </div>
       </header>
 
-      {/* MODALE ACCESSO DA TELEFONI / PC NON SULLA STESSA WIFI */}
+      {/* MODALE ACCESSO DA TELEFONI / PC */}
       {showRemoteModal && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-5">
@@ -326,7 +332,7 @@ export default function EpisodiaStudioPage() {
               <div className="flex items-center gap-2.5">
                 <Globe className="w-5 h-5 text-amber-400" />
                 <h3 className="text-base font-bold text-white">
-                  Come accedere da Telefono (4G/5G) o da PC su altre reti
+                  Sito Online &amp; QR Code per Smartphone (4G/5G)
                 </h3>
               </div>
               <button
@@ -339,27 +345,20 @@ export default function EpisodiaStudioPage() {
             </div>
 
             <div className="space-y-4 text-xs text-zinc-300 leading-relaxed">
-              <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-2">
-                <h4 className="font-bold text-violet-300 text-sm">
-                  Modalità 1 — Link Pubblico HTTPS istantaneo (4G/5G dal Telefono o altro PC)
-                </h4>
-                <p className="text-zinc-400">
-                  Quando il server gira su questo PC, un tunnel pubblico HTTPS espone la porta <code className="text-amber-300">3005</code> su Internet senza bisogno di essere sulla stessa Wi-Fi. Tutti i personaggi, serie, titoli e trame sono letti direttamente da <code className="text-amber-300">data/episodia-db.json</code>.
-                </p>
-                <div className="pt-2">
+              <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-3">
+                <div className="pt-1">
                   <label className="block text-[11px] font-bold uppercase text-zinc-500 mb-1">
-                    Incolla qui il tuo URL Tunnel Pubblico per generare il QR Code:
+                    URL Sito Online Vercel:
                   </label>
                   <input
                     type="url"
                     value={publicTunnelUrl}
                     onChange={(e) => setPublicTunnelUrl(e.target.value)}
-                    placeholder="Es. https://episodia-studio.loca.lt oppure https://xxxx.lhr.life"
                     className="w-full rounded-xl bg-zinc-900 border border-zinc-800 px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500"
                   />
                 </div>
                 {publicTunnelUrl.trim() && (
-                  <div className="pt-3 flex items-center gap-4">
+                  <div className="pt-2 flex items-center gap-4">
                     <img
                       src={`https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(
                         publicTunnelUrl.trim()
@@ -384,15 +383,6 @@ export default function EpisodiaStudioPage() {
                     </div>
                   </div>
                 )}
-              </div>
-
-              <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-2">
-                <h4 className="font-bold text-amber-300 text-sm">
-                  Modalità 2 — Cloud Database Sempre Attivo (anche a PC spento)
-                </h4>
-                <p className="text-zinc-400">
-                  Se apri l&apos;app su due PC diversi (o la pubblichi gratis su <strong>Vercel / Netlify</strong>), vai nella tab <strong>2. Serie TV in Parallelo → Configura Cloud Remoto</strong> e incolla l&apos;URL di un database gratuito (es. Firebase Realtime Database <code className="text-zinc-200">https://tuo-progetto.firebasedatabase.app/episodia.json</code>). Tutte le serie, i personaggi, i titoli e le trame si sincronizzano via Internet in tempo reale!
-                </p>
               </div>
             </div>
           </div>
@@ -496,7 +486,7 @@ export default function EpisodiaStudioPage() {
                 Serie Selezionata
               </span>
               <p className="text-xs font-bold text-white truncate mt-0.5">
-                {activeSeries.title}
+                {activeSeries ? activeSeries.title : 'Nessuna serie attiva'}
               </p>
               {activeEpisode && (
                 <p className="text-[11px] text-amber-400 truncate mt-0.5">
@@ -513,7 +503,7 @@ export default function EpisodiaStudioPage() {
             <div className="h-96 flex flex-col items-center justify-center gap-3 text-zinc-400">
               <div className="w-10 h-10 rounded-full border-2 border-violet-500 border-t-transparent animate-spin" />
               <p className="text-xs font-medium">
-                Sincronizzazione Cast Globale e Serie TV dal Server...
+                Sincronizzazione Cast Globale e Serie TV da Supabase...
               </p>
             </div>
           ) : (
@@ -529,7 +519,7 @@ export default function EpisodiaStudioPage() {
               {activeTab === 'series' && (
                 <SeriesHubView
                   seriesList={seriesList}
-                  activeSeriesId={activeSeries.id}
+                  activeSeriesId={activeSeries?.id || ''}
                   cast={cast}
                   episodes={episodes}
                   cloudConfig={cloudConfig}
@@ -552,25 +542,46 @@ export default function EpisodiaStudioPage() {
                 />
               )}
 
-              {activeTab === 'writers-room' && (
-                <WritersRoomView
-                  cast={cast}
-                  seriesList={seriesList}
-                  activeSeries={activeSeries}
-                  episodes={episodes}
-                  activeEpisodeId={activeEpisode?.id ?? null}
-                  onSelectSeries={handleSelectSeries}
-                  onSaveSeriesDraft={handleSaveSeries}
-                  onEpisodeCreated={handleEpisodeCreated}
-                  onUpdateEpisode={handleUpdateEpisode}
-                  onSelectEpisode={(id) => {
-                    setActiveEpisodeId(id);
-                    setActiveTab('storyboard');
-                  }}
-                  onDeleteEpisode={handleDeleteEpisode}
-                  onGoToCast={() => setActiveTab('cast')}
-                />
-              )}
+              {activeTab === 'writers-room' &&
+                (activeSeries ? (
+                  <WritersRoomView
+                    cast={cast}
+                    seriesList={seriesList}
+                    activeSeries={activeSeries}
+                    episodes={episodes}
+                    activeEpisodeId={activeEpisode?.id ?? null}
+                    onSelectSeries={handleSelectSeries}
+                    onSaveSeriesDraft={handleSaveSeries}
+                    onEpisodeCreated={handleEpisodeCreated}
+                    onUpdateEpisode={handleUpdateEpisode}
+                    onSelectEpisode={(id) => {
+                      setActiveEpisodeId(id);
+                      setActiveTab('storyboard');
+                    }}
+                    onDeleteEpisode={handleDeleteEpisode}
+                    onGoToCast={() => setActiveTab('cast')}
+                  />
+                ) : (
+                  <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-12 text-center max-w-2xl mx-auto my-8">
+                    <div className="w-16 h-16 rounded-2xl bg-violet-600/20 border border-violet-500/40 flex items-center justify-center mx-auto mb-4 text-violet-400">
+                      <Tv className="w-8 h-8" />
+                    </div>
+                    <h2 className="text-xl font-bold text-zinc-100 mb-2">
+                      Crea la tua prima serie
+                    </h2>
+                    <p className="text-sm text-zinc-400 mb-6">
+                      Per scrivere una puntata nella Writer&apos;s Room, crea prima una serie TV!
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('series')}
+                      className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-sm font-bold shadow-lg transition"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Crea la tua prima serie
+                    </button>
+                  </div>
+                ))}
 
               {activeTab === 'storyboard' && (
                 <StoryboardStudioView
@@ -583,6 +594,7 @@ export default function EpisodiaStudioPage() {
                   onSelectEpisode={(id) => setActiveEpisodeId(id)}
                   onUpdateEpisode={handleUpdateEpisode}
                   onGoToWritersRoom={() => setActiveTab('writers-room')}
+                  onGoToSeriesHub={() => setActiveTab('series')}
                 />
               )}
             </>

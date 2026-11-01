@@ -13,17 +13,6 @@ export const EPISODES_STORAGE_KEY = 'episodia_episodes';
 export const LOCAL_MEDIA_STORAGE_KEY = 'episodia_local_media';
 export const CLOUD_CONFIG_STORAGE_KEY = 'episodia_cloud_config';
 
-const DEFAULT_SERIES_ITEM: Series = {
-  id: 'series-default-1',
-  title: 'Serie Principale',
-  description: 'Sitcom social in formato verticale per Reels e TikTok',
-  genre: 'Sitcom brillante',
-  defaultAspectRatio: '9:16',
-  castIds: [],
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-};
-
 // ============================================================================
 // CLOUD & SERVER SYNC CONFIGURATION
 // ============================================================================
@@ -45,11 +34,6 @@ export async function saveCloudSyncConfig(
   await set(CLOUD_CONFIG_STORAGE_KEY, config);
 }
 
-/**
- * Sincronizza Personaggi, Serie ed Episodi con il Server (/api/studio-db)
- * e opzionalmente con un Endpoint Cloud remoto (es. Firebase, JSONBin, Supabase).
- * I file video pesanti generati NON vengono mai caricati sul server.
- */
 export async function pushStateToServer(): Promise<{
   ok: boolean;
   updatedAt?: string;
@@ -103,9 +87,6 @@ export async function pushStateToServer(): Promise<{
   }
 }
 
-/**
- * Carica lo stato completo unificando Server/Cloud + Cache IndexedDB + File Video Locali.
- */
 export async function pullStateFromServer(): Promise<{
   cast: Character[];
   series: Series[];
@@ -141,45 +122,17 @@ export async function pullStateFromServer(): Promise<{
         source?: string;
       };
 
-      const serverHasData =
-        (serverData.cast && serverData.cast.length > 0) ||
-        (serverData.episodes && serverData.episodes.length > 0) ||
-        (serverData.series && serverData.series.length > 1);
+      const finalCast = Array.isArray(serverData.cast) ? serverData.cast : [];
+      const rawSeries = Array.isArray(serverData.series)
+        ? serverData.series
+        : [];
+      const finalSeries = attachLocalMediaToSeries(rawSeries, localMediaMap);
 
-      const localHasData =
-        localCast.length > 0 ||
-        localEpisodes.length > 0 ||
-        localSeries.length > 1;
-
-      // Se il browser locale aveva già dati salvati e il server era appena stato inizializzato vuoto,
-      // carichiamo automaticamente i dati locali sul server!
-      if (!serverHasData && localHasData) {
-        await pushStateToServer();
-        const hydratedLocalEpisodes = attachLocalMediaToEpisodes(
-          localEpisodes,
-          localMediaMap
-        );
-        return {
-          cast: localCast,
-          series: localSeries,
-          episodes: hydratedLocalEpisodes,
-          source: 'local-pushed-to-server',
-        };
-      }
-
-      const finalCast = serverData.cast || [];
-      const finalSeries =
-        serverData.series && serverData.series.length > 0
-          ? serverData.series
-          : [DEFAULT_SERIES_ITEM];
-
-      // Associa eventuali episodi privi di seriesId alla prima serie disponibile
       const normalizedEpisodes = (serverData.episodes || []).map((ep) => ({
         ...ep,
-        seriesId: ep.seriesId || finalSeries[0].id,
+        seriesId: ep.seriesId || finalSeries[0]?.id || '',
       }));
 
-      // Ri-collega i video salvati solo in locale su questo PC
       const hydratedEpisodes = attachLocalMediaToEpisodes(
         normalizedEpisodes,
         localMediaMap
@@ -202,20 +155,16 @@ export async function pullStateFromServer(): Promise<{
     console.warn('Server non raggiungibile, uso IndexedDB locale:', err);
   }
 
-  const hydratedLocalEpisodes = attachLocalMediaToEpisodes(
-    localEpisodes,
-    localMediaMap
-  );
   return {
     cast: localCast,
-    series: localSeries,
-    episodes: hydratedLocalEpisodes,
+    series: attachLocalMediaToSeries(localSeries, localMediaMap),
+    episodes: attachLocalMediaToEpisodes(localEpisodes, localMediaMap),
     source: 'indexeddb-offline',
   };
 }
 
 // ============================================================================
-// LOCAL-ONLY GENERATED MEDIA STORAGE (Video/Clip salvati SOLO in locale)
+// LOCAL-ONLY GENERATED MEDIA STORAGE (Video/Clip e Sigle salvati SOLO in locale)
 // ============================================================================
 
 export async function getLocalGeneratedMediaMap(): Promise<
@@ -231,19 +180,21 @@ export async function getLocalGeneratedMediaMap(): Promise<
 }
 
 export async function saveLocalGeneratedVideo(
-  shotId: string,
+  mediaKey: string,
   videoDataUrl: string
 ): Promise<void> {
   if (typeof window === 'undefined') return;
   const map = await getLocalGeneratedMediaMap();
-  map[shotId] = videoDataUrl;
+  map[mediaKey] = videoDataUrl;
   await set(LOCAL_MEDIA_STORAGE_KEY, map);
 }
 
-export async function deleteLocalGeneratedVideo(shotId: string): Promise<void> {
+export async function deleteLocalGeneratedVideo(
+  mediaKey: string
+): Promise<void> {
   if (typeof window === 'undefined') return;
   const map = await getLocalGeneratedMediaMap();
-  delete map[shotId];
+  delete map[mediaKey];
   await set(LOCAL_MEDIA_STORAGE_KEY, map);
 }
 
@@ -258,6 +209,27 @@ function attachLocalMediaToEpisodes(
       videoUrl: mediaMap[shot.id] || shot.videoUrl,
     })),
   }));
+}
+
+function attachLocalMediaToSeries(
+  seriesList: Series[],
+  mediaMap: Record<string, string>
+): Series[] {
+  return seriesList.map((s) => {
+    if (!s.intro) return s;
+    const introKey = `intro-${s.id}`;
+    return {
+      ...s,
+      intro: {
+        ...s.intro,
+        introVideoUrl: mediaMap[introKey] || s.intro.introVideoUrl,
+        shots: (s.intro.shots || []).map((shot) => ({
+          ...shot,
+          videoUrl: mediaMap[shot.id] || shot.videoUrl,
+        })),
+      },
+    };
+  });
 }
 
 // ============================================================================
@@ -315,17 +287,13 @@ export async function clearCast(): Promise<void> {
 // ============================================================================
 
 export async function getSeriesList(): Promise<Series[]> {
-  if (typeof window === 'undefined') return [DEFAULT_SERIES_ITEM];
+  if (typeof window === 'undefined') return [];
   try {
     const data = await get<Series[]>(SERIES_STORAGE_KEY);
-    if (Array.isArray(data) && data.length > 0) {
-      return data;
-    }
-    await set(SERIES_STORAGE_KEY, [DEFAULT_SERIES_ITEM]);
-    return [DEFAULT_SERIES_ITEM];
+    return Array.isArray(data) ? data : [];
   } catch (error) {
     console.error('Errore durante la lettura delle Serie da IndexedDB:', error);
-    return [DEFAULT_SERIES_ITEM];
+    return [];
   }
 }
 
@@ -359,10 +327,7 @@ export async function deleteSeries(seriesId: string): Promise<{
   episodes: Episode[];
 }> {
   const currentSeries = await getSeriesList();
-  let updatedSeries = currentSeries.filter((s) => s.id !== seriesId);
-  if (updatedSeries.length === 0) {
-    updatedSeries = [DEFAULT_SERIES_ITEM];
-  }
+  const updatedSeries = currentSeries.filter((s) => s.id !== seriesId);
 
   const currentEpisodes = await getEpisodes();
   const updatedEpisodes = currentEpisodes.filter(

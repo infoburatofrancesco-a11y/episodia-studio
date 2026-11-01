@@ -8,21 +8,6 @@ export interface Character {
   voiceId?: string;
 }
 
-export interface Series {
-  id: string;
-  title: string;
-  description: string;
-  genre: string;
-  defaultAspectRatio: '9:16' | '16:9';
-  castIds: string[];
-  draftTitle?: string;
-  draftLogline?: string;
-  draftCastIds?: string[];
-  draftShotCount?: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface Shot {
   id: string;
   shotNumber: number;
@@ -35,6 +20,31 @@ export interface Shot {
   videoUrl?: string;
   localMediaKey?: string;
   status: 'draft' | 'generating' | 'ready';
+}
+
+export interface SeriesIntro {
+  enabled: boolean;
+  durationSeconds: 5 | 10 | 15;
+  concept: string;
+  shots: Shot[];
+  introVideoUrl?: string;
+  updatedAt: string;
+}
+
+export interface Series {
+  id: string;
+  title: string;
+  description: string;
+  genre: string;
+  defaultAspectRatio: '9:16' | '16:9';
+  castIds: string[];
+  intro?: SeriesIntro;
+  draftTitle?: string;
+  draftLogline?: string;
+  draftCastIds?: string[];
+  draftShotCount?: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Episode {

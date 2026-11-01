@@ -77,7 +77,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const clampedShotCount = Math.min(6, Math.max(3, Number(shotCount) || 4));
+    const clampedShotCount = Math.min(6, Math.max(1, Number(shotCount) || 4));
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey || apiKey === 'la_tua_chiave_qui') {
