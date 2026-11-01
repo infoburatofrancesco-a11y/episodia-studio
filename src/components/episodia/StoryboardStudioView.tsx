@@ -30,6 +30,10 @@ import {
 } from 'lucide-react';
 import type { Character, Series, Episode, Shot } from '@/types/episodia';
 import { saveLocalGeneratedVideo } from '@/lib/storage';
+import {
+  renderShotVideoDataUrl,
+  stitchVideoClipsIntoSingleVideo,
+} from '@/lib/videoRenderer';
 
 interface StoryboardStudioViewProps {
   seriesList: Series[];
@@ -80,6 +84,11 @@ export default function StoryboardStudioView({
   const [regeneratingShotId, setRegeneratingShotId] = useState<string | null>(
     null
   );
+  const [renderingVideoShotId, setRenderingVideoShotId] = useState<
+    string | null
+  >(null);
+  const [isStitchingFinalVideo, setIsStitchingFinalVideo] = useState(false);
+  const [stitchStatus, setStitchStatus] = useState<string | null>(null);
   const [isRegeneratingWholeEpisode, setIsRegeneratingWholeEpisode] =
     useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
@@ -273,8 +282,156 @@ export default function StoryboardStudioView({
     if (!shot.videoUrl) return;
     const a = document.createElement('a');
     a.href = shot.videoUrl;
-    a.download = `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_Shot${shot.shotNumber}.mp4`;
+    a.download = `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_Shot${shot.shotNumber}.webm`;
     a.click();
+  };
+
+  // Genera la clip video di 5s per un singolo Shot dell'episodio e la salva SOLO in locale
+  const handleGenerateShotVideoLocal = async (shot: Shot): Promise<string | null> => {
+    setRenderingVideoShotId(shot.id);
+    try {
+      await handleShotChange(shot.id, { status: 'generating' });
+
+      const speaker = shot.speakerId ? castMap.get(shot.speakerId) : null;
+      const shotChars = shot.characterIds
+        .map((id) => castMap.get(id))
+        .filter((c): c is Character => Boolean(c));
+      const effectiveChars = shotChars.length > 0 ? shotChars : cast;
+      const refPhotos = effectiveChars.flatMap((c) =>
+        c.referenceImagesBase64 && c.referenceImagesBase64.length > 0
+          ? [c.referenceImagesBase64[0]]
+          : [c.referenceImageBase64]
+      );
+
+      const mediaRes = await fetch('/api/generate-shot-media', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          visualPromptEn: shot.visualPromptEn,
+          dialogueIta: shot.dialogueIta,
+          speakerName: speaker?.name,
+          speakerCategory: speaker?.category || 'human',
+          aspectRatio,
+          referenceImagesBase64: refPhotos,
+          shotNumber: shot.shotNumber,
+        }),
+      });
+
+      const mediaData = await mediaRes.json();
+      const frameImg =
+        mediaData.frameImageBase64 ||
+        refPhotos[0] ||
+        cast[0]?.referenceImageBase64;
+
+      if (!frameImg) {
+        throw new Error('Nessuna immagine disponibile per generare la clip.');
+      }
+
+      const clipDataUrl = await renderShotVideoDataUrl({
+        frameImageBase64: frameImg,
+        audioWavBase64: mediaData.audioWavBase64,
+        dialogueIta: shot.dialogueIta,
+        speakerName: speaker?.name,
+        shotLabel: `EP. #${activeEpisode.episodeNumber} • SHOT #${shot.shotNumber}`,
+        durationSeconds: 5,
+        aspectRatio,
+        compactForCloud: false,
+      });
+
+      await saveLocalGeneratedVideo(shot.id, clipDataUrl);
+      await handleShotChange(shot.id, {
+        videoUrl: clipDataUrl,
+        localMediaKey: shot.id,
+        status: 'ready',
+      });
+      return clipDataUrl;
+    } catch (err) {
+      console.error('Errore generazione clip shot locale:', err);
+      await handleShotChange(shot.id, { status: 'draft' });
+      return null;
+    } finally {
+      setRenderingVideoShotId(null);
+    }
+  };
+
+  // Genera eventuali shot mancanti, UNISCE in testa il Video Sigla dal Database Cloud (0s-15s)
+  // e scarica l'UNICO file video finale completo SOLO in locale!
+  const handleRenderAndMergeCompleteLocalVideo = async () => {
+    setIsStitchingFinalVideo(true);
+    try {
+      const clipsToMerge: string[] = [];
+
+      // 1. Se la serie ha il Video Sigla sul Database Cloud, lo mettiamo in TESTA (0s - 15s)!
+      if (hasActiveIntro && activeSeries.intro?.introVideoUrl) {
+        clipsToMerge.push(activeSeries.intro.introVideoUrl);
+      } else if (
+        hasActiveIntro &&
+        activeSeries.intro?.shots &&
+        activeSeries.intro.shots.some((s) => s.videoUrl)
+      ) {
+        activeSeries.intro.shots.forEach((s) => {
+          if (s.videoUrl) clipsToMerge.push(s.videoUrl);
+        });
+      }
+
+      // 2. Per ogni Shot della puntata, usa la clip locale già pronta o generala al volo
+      const updatedShots = [...activeEpisode.shots];
+      for (let i = 0; i < updatedShots.length; i++) {
+        const s = updatedShots[i];
+        let clipUrl: string | undefined | null = s.videoUrl;
+        if (!clipUrl) {
+          setStitchStatus(
+            `Generazione AI Shot #${s.shotNumber}/${updatedShots.length} (5s)...`
+          );
+          clipUrl = await handleGenerateShotVideoLocal(s);
+          if (clipUrl) {
+            updatedShots[i] = {
+              ...s,
+              videoUrl: clipUrl,
+              localMediaKey: s.id,
+              status: 'ready',
+            };
+          }
+        }
+        if (clipUrl) {
+          clipsToMerge.push(clipUrl);
+        }
+      }
+
+      await onUpdateEpisode({
+        ...activeEpisode,
+        shots: updatedShots,
+      });
+
+      if (clipsToMerge.length === 0) {
+        return;
+      }
+
+      setStitchStatus(
+        hasActiveIntro && activeSeries.intro?.introVideoUrl
+          ? `Unione Sigla Cloud (${introDurationOffset}s in testa) + Puntata in un unico file video locale...`
+          : 'Unione Shot in un unico file video locale...'
+      );
+
+      const mergedFinalVideoUrl = await stitchVideoClipsIntoSingleVideo(
+        clipsToMerge,
+        aspectRatio,
+        false
+      );
+
+      const finalKey = `final-ep-${activeEpisode.id}`;
+      await saveLocalGeneratedVideo(finalKey, mergedFinalVideoUrl);
+
+      const a = document.createElement('a');
+      a.href = mergedFinalVideoUrl;
+      a.download = `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_COMPLETO_CON_SIGLA.webm`;
+      a.click();
+    } catch (err) {
+      console.error('Errore unione video finale con sigla:', err);
+    } finally {
+      setIsStitchingFinalVideo(false);
+      setStitchStatus(null);
+    }
   };
 
   // Costruisce la timeline completa di esportazione con la Sigla (max 15s) in testa + gli Shot dell'episodio
@@ -664,14 +821,35 @@ export default function StoryboardStudioView({
               </div>
             )}
 
-            <div className="flex items-center justify-end gap-3 pt-2">
+            <div className="space-y-2.5 pt-2">
+              <button
+                type="button"
+                disabled={isStitchingFinalVideo}
+                onClick={handleRenderAndMergeCompleteLocalVideo}
+                className="w-full py-3.5 px-5 rounded-xl bg-gradient-to-r from-emerald-500 to-amber-500 hover:from-emerald-400 hover:to-amber-400 text-zinc-950 font-black text-xs uppercase tracking-wider shadow-lg flex items-center justify-center gap-2 transition disabled:opacity-50"
+              >
+                {isStitchingFinalVideo ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    {stitchStatus || 'Generazione e Unione Video con Sigla in corso...'}
+                  </>
+                ) : (
+                  <>
+                    <Film className="w-4 h-4" />
+                    {hasActiveIntro
+                      ? `Genera & Unisci in Unico Video Locale (Sigla Cloud ${introDurationOffset}s + Puntata)`
+                      : 'Genera & Scarica Video Unico della Puntata in Locale'}
+                  </>
+                )}
+              </button>
+
               <button
                 type="button"
                 onClick={handleExportCompleteEpisodePackage}
-                className="w-full py-3.5 px-5 rounded-xl bg-gradient-to-r from-emerald-500 to-amber-500 hover:from-emerald-400 hover:to-amber-400 text-zinc-950 font-black text-xs uppercase tracking-wider shadow-lg flex items-center justify-center gap-2 transition"
+                className="w-full py-2.5 px-4 rounded-xl bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 font-bold text-xs flex items-center justify-center gap-2 transition"
               >
-                <Download className="w-4 h-4" />
-                Scarica Esportazione Completa (Sigla {introDurationOffset}s in Testa + Puntata)
+                <Download className="w-3.5 h-3.5 text-emerald-400" />
+                Scarica Timeline JSON + Singole Clip Separate
               </button>
             </div>
           </div>
@@ -1116,17 +1294,26 @@ export default function StoryboardStudioView({
 
                     <button
                       type="button"
-                      onClick={() =>
-                        setStep2NoticeShotId(
-                          step2NoticeShotId === shot.id ? null : shot.id
-                        )
+                      disabled={
+                        renderingVideoShotId === shot.id ||
+                        isStitchingFinalVideo
                       }
-                      className="mt-4 w-full py-3 px-4 rounded-xl bg-gradient-to-r from-violet-600 to-amber-500 hover:from-violet-500 hover:to-amber-400 text-zinc-950 font-extrabold text-xs uppercase tracking-wider shadow-lg shadow-violet-600/20 flex items-center justify-center gap-2 transition"
+                      onClick={() => handleGenerateShotVideoLocal(shot)}
+                      className="mt-4 w-full py-3 px-4 rounded-xl bg-gradient-to-r from-violet-600 to-amber-500 hover:from-violet-500 hover:to-amber-400 text-zinc-950 font-extrabold text-xs uppercase tracking-wider shadow-lg shadow-violet-600/20 flex items-center justify-center gap-2 transition disabled:opacity-50"
                     >
-                      <Sparkles className="w-4 h-4" />
-                      {shot.videoUrl
-                        ? 'Rigenera Clip (Passo 2)'
-                        : 'Genera Clip (Passo 2)'}
+                      {renderingVideoShotId === shot.id ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Generazione Clip 5s (Scena + Voce)...
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-4 h-4" />
+                          {shot.videoUrl
+                            ? 'Rigenera Clip Video AI (5s - Locale)'
+                            : 'Genera Clip Video AI (5s - Locale)'}
+                        </>
+                      )}
                     </button>
 
                     <div className="mt-2.5 w-full grid grid-cols-2 gap-2">

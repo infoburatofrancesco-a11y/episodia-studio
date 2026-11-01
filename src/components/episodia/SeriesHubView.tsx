@@ -36,6 +36,10 @@ import type {
   CloudSyncConfig,
 } from '@/types/episodia';
 import { saveLocalGeneratedVideo } from '@/lib/storage';
+import {
+  renderShotVideoDataUrl,
+  stitchVideoClipsIntoSingleVideo,
+} from '@/lib/videoRenderer';
 
 interface SeriesHubViewProps {
   seriesList: Series[];
@@ -109,6 +113,10 @@ export default function SeriesHubView({
       'Sigla ritmata stile sitcom TV: presentazione veloce dei protagonisti con espressioni iconiche e tormentone iniziale'
   );
   const [isGeneratingIntro, setIsGeneratingIntro] = useState(false);
+  const [isRenderingIntroVideo, setIsRenderingIntroVideo] = useState(false);
+  const [introRenderStatus, setIntroRenderStatus] = useState<string | null>(
+    null
+  );
   const [introError, setIntroError] = useState<string | null>(null);
 
   // Wizard Supabase & Cloud state
@@ -248,6 +256,151 @@ export default function SeriesHubView({
       );
     } finally {
       setIsGeneratingIntro(false);
+    }
+  };
+
+  // Genera direttamente il Video Sigla (max 15s) con AI (Gemini Image + TTS + Canvas Video) e lo salva sul Database Cloud Supabase
+  const handleRenderIntroVideoToCloud = async (targetSeries: Series) => {
+    setIntroError(null);
+    const seriesCast = cast.filter((c) => targetSeries.castIds.includes(c.id));
+    const effectiveCast = seriesCast.length > 0 ? seriesCast : cast;
+
+    if (effectiveCast.length === 0) {
+      setIntroError(
+        'Aggiungi almeno un personaggio nel Cast Globale per generare il Video Sigla.'
+      );
+      return;
+    }
+
+    setIsRenderingIntroVideo(true);
+    try {
+      let shotsToRender = targetSeries.intro?.shots || [];
+      const durationSec = targetSeries.intro?.durationSeconds || introDuration;
+      const conceptText =
+        targetSeries.intro?.concept ||
+        introConcept ||
+        'Presentazione dinamica dei personaggi della serie';
+      const numShots = Math.min(3, Math.max(1, Math.round(durationSec / 5)));
+
+      if (shotsToRender.length === 0) {
+        setIntroRenderStatus('Scrittura sceneggiatura Sigla con Gemini...');
+        const scriptRes = await fetch('/api/generate-script', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: `SIGLA UFFICIALE (${durationSec}s) - ${targetSeries.title}`,
+            logline: `[SIGLA DI APERTURA SERIE TV - DURATA MASSIMA ${durationSec} SECONDI (${numShots} shot da 5s)] Serie: "${targetSeries.title}" (${targetSeries.genre}). Concept sigla: ${conceptText}.`,
+            shotCount: numShots,
+            cast: effectiveCast,
+          }),
+        });
+        const scriptData = await scriptRes.json();
+        if (!scriptRes.ok || !Array.isArray(scriptData.shots)) {
+          throw new Error(
+            scriptData.error || 'Errore nella creazione degli shot della Sigla.'
+          );
+        }
+        shotsToRender = scriptData.shots;
+      }
+
+      const renderedShotClips: string[] = [];
+      const updatedShots: Shot[] = [];
+
+      for (let i = 0; i < shotsToRender.length; i++) {
+        const shot = shotsToRender[i];
+        setIntroRenderStatus(
+          `Generazione AI Shot Sigla ${i + 1}/${shotsToRender.length} (Scena + Voce)...`
+        );
+
+        const speaker = effectiveCast.find((c) => c.id === shot.speakerId);
+        const shotChars = effectiveCast.filter((c) =>
+          shot.characterIds.includes(c.id)
+        );
+        const refPhotos = (
+          shotChars.length > 0 ? shotChars : effectiveCast
+        ).flatMap((c) =>
+          c.referenceImagesBase64 && c.referenceImagesBase64.length > 0
+            ? [c.referenceImagesBase64[0]]
+            : [c.referenceImageBase64]
+        );
+
+        const mediaRes = await fetch('/api/generate-shot-media', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            visualPromptEn: shot.visualPromptEn,
+            dialogueIta: shot.dialogueIta,
+            speakerName: speaker?.name || effectiveCast[0]?.name,
+            speakerCategory: speaker?.category || 'human',
+            aspectRatio: targetSeries.defaultAspectRatio || '9:16',
+            referenceImagesBase64: refPhotos,
+            shotNumber: shot.shotNumber,
+          }),
+        });
+
+        const mediaData = await mediaRes.json();
+        const frameImg =
+          mediaData.frameImageBase64 ||
+          refPhotos[0] ||
+          effectiveCast[0].referenceImageBase64;
+
+        setIntroRenderStatus(
+          `Rendering video 5s per Shot Sigla ${i + 1}/${shotsToRender.length}...`
+        );
+
+        const clipDataUrl = await renderShotVideoDataUrl({
+          frameImageBase64: frameImg,
+          audioWavBase64: mediaData.audioWavBase64,
+          dialogueIta: shot.dialogueIta,
+          speakerName: speaker?.name,
+          shotLabel: `${targetSeries.title.toUpperCase()} • SIGLA`,
+          durationSeconds: 5,
+          aspectRatio: targetSeries.defaultAspectRatio || '9:16',
+          compactForCloud: true,
+        });
+
+        renderedShotClips.push(clipDataUrl);
+        updatedShots.push({
+          ...shot,
+          videoUrl: clipDataUrl,
+          status: 'ready',
+        });
+      }
+
+      setIntroRenderStatus(
+        'Unione finale Sigla (max 15s) e salvataggio sul Database Cloud Supabase...'
+      );
+      const mergedIntroVideoUrl = await stitchVideoClipsIntoSingleVideo(
+        renderedShotClips,
+        targetSeries.defaultAspectRatio || '9:16',
+        true
+      );
+
+      const mediaKey = `intro-${targetSeries.id}`;
+      await saveLocalGeneratedVideo(mediaKey, mergedIntroVideoUrl);
+
+      const updatedIntro: SeriesIntro = {
+        enabled: true,
+        durationSeconds: durationSec,
+        concept: conceptText,
+        shots: updatedShots,
+        introVideoUrl: mergedIntroVideoUrl,
+        updatedAt: new Date().toISOString(),
+      };
+
+      await onSaveSeries({
+        ...targetSeries,
+        intro: updatedIntro,
+      });
+    } catch (err: unknown) {
+      setIntroError(
+        err instanceof Error
+          ? err.message
+          : 'Errore durante la generazione del Video Sigla.'
+      );
+    } finally {
+      setIsRenderingIntroVideo(false);
+      setIntroRenderStatus(null);
     }
   };
 
@@ -1170,21 +1323,40 @@ export default function SeriesHubView({
                   <div className="space-y-2">
                     <button
                       type="button"
-                      disabled={isGeneratingIntro}
+                      disabled={isGeneratingIntro || isRenderingIntroVideo}
                       onClick={() => handleGenerateSeriesIntro(activeSeries)}
                       className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-amber-500 to-violet-600 hover:from-amber-400 hover:to-violet-500 text-zinc-950 font-extrabold text-xs uppercase tracking-wider shadow-lg flex items-center justify-center gap-2 transition disabled:opacity-50"
                     >
                       {isGeneratingIntro ? (
                         <>
                           <Loader2 className="w-4 h-4 animate-spin" />
-                          Generazione Sigla ({activeSeries.intro?.durationSeconds || introDuration}s) con Gemini...
+                          Generazione Sceneggiatura Sigla con Gemini...
                         </>
                       ) : (
                         <>
                           <Wand2 className="w-4 h-4" />
                           {activeSeries.intro?.shots?.length
-                            ? 'Rigenera Sceneggiatura Sigla (AI)'
-                            : 'Genera Sigla con Gemini (Max 15s)'}
+                            ? '1. Rigenera Sceneggiatura Sigla (AI)'
+                            : '1. Genera Sceneggiatura Sigla (Max 15s)'}
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isRenderingIntroVideo || isGeneratingIntro}
+                      onClick={() => handleRenderIntroVideoToCloud(activeSeries)}
+                      className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-zinc-950 font-extrabold text-xs uppercase tracking-wider shadow-lg flex items-center justify-center gap-2 transition disabled:opacity-50"
+                    >
+                      {isRenderingIntroVideo ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          {introRenderStatus || 'Rendering Video Sigla Cloud...'}
+                        </>
+                      ) : (
+                        <>
+                          <Film className="w-4 h-4" />
+                          2. Genera Video Sigla AI e Salva su Database Cloud
                         </>
                       )}
                     </button>
