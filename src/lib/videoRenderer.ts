@@ -356,7 +356,7 @@ export async function renderShotVideoDataUrl(
     const audioCtx = unlockSharedAudioContext();
     let dest: MediaStreamAudioDestinationNode | null = null;
     let analyser: AnalyserNode | null = null;
-    let freqData: Uint8Array<ArrayBuffer> | null = null;
+    let freqData: Uint8Array | null = null;
     let audioBuffer: AudioBuffer | null = null;
 
     if (audioCtx && audioCtx.state === 'running') {
@@ -364,7 +364,7 @@ export async function renderShotVideoDataUrl(
         dest = audioCtx.createMediaStreamDestination();
         analyser = audioCtx.createAnalyser();
         analyser.fftSize = 128;
-        freqData = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
+        freqData = new Uint8Array(analyser.frequencyBinCount);
 
         if (audioWavBase64) {
           const res = await fetch(audioWavBase64);
@@ -440,7 +440,8 @@ export async function renderShotVideoDataUrl(
 
         let voiceEnergy = 0.35 + 0.25 * Math.abs(Math.sin(elapsed * 0.015));
         if (analyser && freqData) {
-          analyser.getByteFrequencyData(freqData);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          analyser.getByteFrequencyData(freqData as any);
           let sum = 0;
           for (let i = 0; i < 24; i++) {
             sum += freqData[i];

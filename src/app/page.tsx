@@ -248,7 +248,7 @@ export default function EpisodiaStudioPage() {
     {
       id: 'storyboard',
       label: '4. Storyboard & Studio',
-      sublabel: 'Editor 5s & Esportazione con Sigla',
+      sublabel: 'Editor 10s & Esportazione con Sigla',
       icon: Film,
       badge: activeEpisode ? activeEpisode.shots.length : undefined,
     },

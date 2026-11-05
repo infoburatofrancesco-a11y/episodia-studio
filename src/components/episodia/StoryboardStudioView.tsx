@@ -41,6 +41,13 @@ import {
 
 function fixWebmDurationOnLoad(e: React.SyntheticEvent<HTMLVideoElement>) {
   const el = e.currentTarget;
+  if (el.currentTime === 0) {
+    try {
+      el.currentTime = 0.05;
+    } catch {
+      // ignore seek error if not ready
+    }
+  }
   if (el.paused && el.autoplay) {
     el.play().catch(() => {});
   }
@@ -462,17 +469,22 @@ export default function StoryboardStudioView({
         });
       }
 
-      // 2. Per ogni Shot della puntata, usa la clip locale valida o generala con Nano Banana
+      // 2. Per ogni Shot della puntata, usa la clip locale valida (10s) o generala con Nano Banana
       const updatedShots = [...activeEpisode.shots];
       const allAlreadyHaveClips = updatedShots.every(
-        (s) => s.videoUrl && s.videoUrl.length > 20000
+        (s) => s.videoUrl && s.videoUrl.length > 20000 && s.duration === 10
       );
 
       for (let i = 0; i < updatedShots.length; i++) {
         const s = updatedShots[i];
         let clipUrl: string | undefined | null = s.videoUrl;
-        // Se non c'è una clip valida (>20KB) oppure l'utente ha cliccato "Genera Video" per rigenerare
-        if (!clipUrl || clipUrl.length < 20000 || (!downloadImmediately && allAlreadyHaveClips)) {
+        // Se non c'è una clip valida da 10s (>20KB) oppure l'utente ha cliccato "Genera Video" per rigenerare
+        if (
+          !clipUrl ||
+          clipUrl.length < 20000 ||
+          s.duration !== 10 ||
+          (!downloadImmediately && allAlreadyHaveClips)
+        ) {
           setStitchStatus(
             `Nano Banana AI: Generazione pose movimento + voce Shot #${s.shotNumber}/${updatedShots.length} (10s)...`
           );
@@ -1039,6 +1051,15 @@ export default function StoryboardStudioView({
               <button
                 type="button"
                 disabled={isStitchingFinalVideo}
+                onClick={() => handleRenderAndMergeCompleteLocalVideo(false)}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-violet-600/30 hover:bg-violet-600/50 border border-violet-500/50 text-violet-100 font-bold text-xs uppercase tracking-wider transition disabled:opacity-50"
+              >
+                <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
+                Rigenera Clip 10s (Nano Banana)
+              </button>
+              <button
+                type="button"
+                disabled={isStitchingFinalVideo}
                 onClick={() =>
                   mergedEpisodePreviewUrl
                     ? handleDownloadMergedPreviewVideo()
@@ -1063,10 +1084,16 @@ export default function StoryboardStudioView({
                   ? normalizeVideoDataUrl(mergedEpisodePreviewUrl)
                   : playableClips[currentPlaylistIdx]?.videoUrl
               }
+              poster={
+                cast.find((c) => activeEpisode.selectedCastIds.includes(c.id))
+                  ?.referenceImageBase64
+              }
+              preload="auto"
               controls
               autoPlay
               playsInline
               onLoadedMetadata={fixWebmDurationOnLoad}
+              onLoadedData={fixWebmDurationOnLoad}
               onEnded={() => {
                 if (
                   !mergedEpisodePreviewUrl &&
@@ -1468,11 +1495,14 @@ export default function StoryboardStudioView({
                       {shot.videoUrl && shot.videoUrl.length > 20000 ? (
                         <video
                           src={normalizeVideoDataUrl(shot.videoUrl)}
+                          poster={shotCharacters[0]?.referenceImageBase64}
+                          preload="auto"
                           controls
                           autoPlay
                           loop
                           playsInline
                           onLoadedMetadata={fixWebmDurationOnLoad}
+                          onLoadedData={fixWebmDurationOnLoad}
                           className="absolute inset-0 w-full h-full object-cover z-20"
                         />
                       ) : (
