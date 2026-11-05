@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
 
+// Estende il timeout delle Serverless Functions su Vercel fino a 60 secondi
+export const maxDuration = 60;
+
 interface GenerateShotMediaBody {
   visualPromptEn: string;
   dialogueIta?: string;
@@ -52,7 +55,7 @@ function pcm24kMonoToWavBase64(pcmBase64: string, sampleRate = 24000): string {
 const VOICE_POOL = ['Puck', 'Kore', 'Aoede', 'Charon', 'Fenrir'];
 
 function pickVoiceForSpeaker(speakerName?: string): string {
-  if (!speakerName) return 'Kore';
+  if (!speakerName) return 'Puck';
   let hash = 0;
   for (let i = 0; i < speakerName.length; i++) {
     hash = (hash * 31 + speakerName.charCodeAt(i)) % 1000;
@@ -124,9 +127,10 @@ export async function POST(req: NextRequest) {
 
     const ai = new GoogleGenAI({ apiKey });
 
+    // Usiamo max 2 foto di riferimento per velocizzare la risposta sotto i 5 secondi
     const refParts: Array<{ inlineData: { mimeType: string; data: string } }> =
       [];
-    for (const refImg of referenceImagesBase64.slice(0, 4)) {
+    for (const refImg of referenceImagesBase64.slice(0, 2)) {
       const parsed = parseDataUrl(refImg);
       if (parsed) {
         refParts.push({
@@ -143,19 +147,14 @@ export async function POST(req: NextRequest) {
         ? 'vertical 9:16 portrait smartphone social format'
         : 'horizontal 16:9 widescreen cinematic format';
 
-    // Generiamo con NANO BANANA 3 fotogrammi d'azione sequenziali (Pose 1 -> Pose 2 -> Pose 3)
-    // in modo che il personaggio si muova, gesticoli, cambi espressione e parli nella scena!
     const beatPrompts = [
-      `[NANO BANANA MOTION FRAME 1 of 3 - START OF ACTION] Generate a photorealistic cinematic TV series frame in ${orientationLabel}. Preserve the exact identity, face, and clothes of the reference character photo(s). Scene: ${visualPromptEn}. Pose 1: Character begins the physical movement, looking towards camera, mouth slightly open starting to speak expressively. No text overlays.`,
-      `[NANO BANANA MOTION FRAME 2 of 3 - PEAK GESTURE & SPEAKING] Generate a photorealistic cinematic TV series frame in ${orientationLabel} in the EXACT SAME environment and lighting. Preserve the exact identity of the reference character photo(s). Scene: ${visualPromptEn}. Pose 2: Character is mid-action with dynamic hand/body movement, head tilted, animated facial expression and open mouth actively speaking Italian dialogue. No text overlays.`,
-      `[NANO BANANA MOTION FRAME 3 of 3 - EXPRESSIVE REACTION / FINISH] Generate a photorealistic cinematic TV series frame in ${orientationLabel} in the EXACT SAME environment and lighting. Preserve the exact identity of the reference character photo(s). Scene: ${visualPromptEn}. Pose 3: Character completes the gesture with a strong comedic/expressive facial reaction, dynamic posture shift. No text overlays.`,
+      `Generate a photorealistic cinematic TV series frame in ${orientationLabel}. Keep the exact face and identity of the reference character photo(s). Scene: ${visualPromptEn}. Pose A: Character is looking at the camera, gesturing naturally with hands and speaking with mouth open. No text overlays.`,
+      `Generate a photorealistic cinematic TV series frame in ${orientationLabel} in the exact same room and lighting. Keep the exact face and identity of the reference character photo(s). Scene: ${visualPromptEn}. Pose B: Character shifts posture dynamically with an expressive comedic facial reaction and animated gesture. No text overlays.`,
     ];
 
-    // Eseguiamo in parallelo i 3 frame d'azione Nano Banana + la sintesi vocale italiana TTS
-    const [frame1, frame2, frame3, audioWavBase64] = await Promise.all([
+    const [frame1, frame2, audioWavBase64] = await Promise.all([
       generateSingleNanoBananaFrame(ai, refParts, beatPrompts[0]),
       generateSingleNanoBananaFrame(ai, refParts, beatPrompts[1]),
-      generateSingleNanoBananaFrame(ai, refParts, beatPrompts[2]),
       (async (): Promise<string | null> => {
         if (!dialogueIta || !dialogueIta.trim()) return null;
         const voiceName = pickVoiceForSpeaker(speakerName);
@@ -209,12 +208,12 @@ export async function POST(req: NextRequest) {
       })(),
     ]);
 
-    const framesBase64 = [frame1, frame2, frame3].filter(
-      (f): f is string => Boolean(f)
+    const framesBase64 = [frame1, frame2].filter((f): f is string =>
+      Boolean(f)
     );
 
     if (framesBase64.length === 0 && referenceImagesBase64.length > 0) {
-      framesBase64.push(...referenceImagesBase64.slice(0, 3));
+      framesBase64.push(...referenceImagesBase64.slice(0, 2));
     }
 
     return NextResponse.json({

@@ -9,6 +9,7 @@ export interface RenderShotVideoParams {
   durationSeconds?: number;
   aspectRatio?: '9:16' | '16:9';
   compactForCloud?: boolean;
+  onProgress?: (percent: number) => void;
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -36,11 +37,10 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 function pickSupportedVideoMimeType(): string {
   if (typeof MediaRecorder === 'undefined') return 'video/webm';
   const candidates = [
-    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
-    'video/mp4',
     'video/webm;codecs=vp9,opus',
     'video/webm;codecs=vp8,opus',
     'video/webm',
+    'video/mp4',
   ];
   for (const mime of candidates) {
     if (MediaRecorder.isTypeSupported(mime)) {
@@ -106,7 +106,7 @@ function drawCoverImage(
 
 /**
  * Renderizza un singolo Shot animando i fotogrammi d'azione multipli generati da Nano Banana (`framesBase64`)
- * sincronizzati con la voce recitata italiana (`AnalyserNode` + lip/body motion reattivo all'audio).
+ * sincronizzati con la voce recitata italiana (`AnalyserNode` + movimento parlante reattivo all'audio).
  */
 export async function renderShotVideoDataUrl(
   params: RenderShotVideoParams
@@ -121,6 +121,7 @@ export async function renderShotVideoDataUrl(
     durationSeconds = 5,
     aspectRatio = '9:16',
     compactForCloud = false,
+    onProgress,
   } = params;
 
   const width =
@@ -166,6 +167,9 @@ export async function renderShotVideoDataUrl(
     (window as unknown as { webkitAudioContext: typeof AudioContext })
       .webkitAudioContext;
   const audioCtx = new AudioCtx();
+  if (audioCtx.state === 'suspended') {
+    await audioCtx.resume().catch(() => {});
+  }
   const dest = audioCtx.createMediaStreamDestination();
   const analyser = audioCtx.createAnalyser();
   analyser.fftSize = 128;
@@ -228,28 +232,29 @@ export async function renderShotVideoDataUrl(
   const totalMs = durationSeconds * 1000;
 
   await new Promise<void>((resolve) => {
-    const renderFrame = (now: number) => {
-      const elapsed = now - startTime;
+    const timer = setInterval(() => {
+      const elapsed = performance.now() - startTime;
       const progress = Math.min(1, elapsed / totalMs);
+      if (onProgress) {
+        onProgress(Math.min(99, Math.round(progress * 100)));
+      }
 
-      // Calcolo energia vocale istantanea per muovere il personaggio a tempo col parlato
       analyser.getByteFrequencyData(freqData);
       let sum = 0;
       for (let i = 0; i < 24; i++) {
         sum += freqData[i];
       }
-      const voiceEnergy = Math.min(1, sum / (24 * 170));
+      const voiceEnergy = Math.min(1, sum / (24 * 160));
 
       ctx.fillStyle = '#09090b';
       ctx.fillRect(0, 0, width, height);
 
-      // Movimento fisico reattivo alla voce + ciclo tra le pose d'azione Nano Banana
       const talkBounceY =
-        Math.sin(elapsed * 0.022) * (height * 0.008 * (0.3 + voiceEnergy * 1.4));
+        Math.sin(elapsed * 0.024) * (height * 0.009 * (0.35 + voiceEnergy * 1.5));
       const talkTiltRad =
-        Math.sin(elapsed * 0.011) * (0.012 * (0.4 + voiceEnergy));
-      const baseScale = 1.03 + progress * 0.06 + voiceEnergy * 0.025;
-      const panX = Math.sin(progress * Math.PI * 1.5) * (width * 0.018);
+        Math.sin(elapsed * 0.012) * (0.014 * (0.4 + voiceEnergy));
+      const baseScale = 1.03 + progress * 0.06 + voiceEnergy * 0.028;
+      const panX = Math.sin(progress * Math.PI * 1.5) * (width * 0.02);
       const panY = talkBounceY;
 
       if (loadedFrames.length === 1) {
@@ -265,21 +270,14 @@ export async function renderShotVideoDataUrl(
           1
         );
       } else {
-        // Alterna dinamicamente le pose Nano Banana (es. Posa 1 inizio, Posa 2 parlato attivo/gesto, Posa 3 reazione)
-        // sincronizzandole anche con i picchi della voce!
-        const numFrames = loadedFrames.length;
-        const timelinePos = progress * (numFrames - 0.01);
-        const primaryIdx = Math.min(numFrames - 1, Math.floor(timelinePos));
-        const nextIdx = Math.min(numFrames - 1, primaryIdx + 1);
-        const localFrac = timelinePos - primaryIdx;
-
-        // Crossfade rapido sugli snodi d'azione + switch sul frame di parlato quando la voce è forte
-        const activePoseIdx =
-          voiceEnergy > 0.38 && numFrames >= 2 ? 1 : primaryIdx;
+        // Alterna dinamicamente le pose Nano Banana sincronizzandole con la voce e l'azione!
+        const cycleWave = (Math.sin(elapsed * 0.0065) + 1) / 2;
+        const blendFactor =
+          voiceEnergy > 0.35 ? Math.min(1, cycleWave * 0.5 + 0.5) : cycleWave * 0.7;
 
         drawCoverImage(
           ctx,
-          loadedFrames[activePoseIdx],
+          loadedFrames[0],
           width,
           height,
           baseScale,
@@ -289,21 +287,17 @@ export async function renderShotVideoDataUrl(
           1
         );
 
-        // Transizione fluida tra una posa Nano Banana e la successiva
-        if (localFrac > 0.72 && nextIdx !== activePoseIdx) {
-          const blendAlpha = (localFrac - 0.72) / 0.28;
-          drawCoverImage(
-            ctx,
-            loadedFrames[nextIdx],
-            width,
-            height,
-            baseScale,
-            panX,
-            panY,
-            talkTiltRad * 0.8,
-            blendAlpha
-          );
-        }
+        drawCoverImage(
+          ctx,
+          loadedFrames[1 % loadedFrames.length],
+          width,
+          height,
+          baseScale * (1 + voiceEnergy * 0.012),
+          panX * 0.9,
+          panY * 1.1,
+          -talkTiltRad * 0.7,
+          blendFactor
+        );
       }
 
       // Gradiente cinematografico inferiore per sottotitoli nitidi
@@ -313,7 +307,6 @@ export async function renderShotVideoDataUrl(
       ctx.fillStyle = grad;
       ctx.fillRect(0, height * 0.58, width, height * 0.42);
 
-      // Badge superiore
       if (shotLabel) {
         ctx.save();
         const fontSize = Math.round(width * 0.026);
@@ -321,15 +314,12 @@ export async function renderShotVideoDataUrl(
         const padX = 14;
         const textW = ctx.measureText(shotLabel).width;
         ctx.fillStyle = 'rgba(245, 158, 11, 0.92)';
-        ctx.beginPath();
-        ctx.roundRect(20, 20, textW + padX * 2, fontSize + 14, 8);
-        ctx.fill();
+        ctx.fillRect(20, 20, textW + padX * 2, fontSize + 14);
         ctx.fillStyle = '#09090b';
         ctx.fillText(shotLabel, 20 + padX, 20 + fontSize + 2);
         ctx.restore();
       }
 
-      // Sottotitolo e Speaker in basso con indicatore vocale dinamico
       if (dialogueIta.trim()) {
         ctx.save();
         const subFontSize = Math.max(15, Math.round(width * 0.038));
@@ -342,7 +332,7 @@ export async function renderShotVideoDataUrl(
 
         if (speakerName) {
           const speakerFontSize = Math.max(12, Math.round(width * 0.028));
-          ctx.font = `extrabold ${speakerFontSize}px sans-serif`;
+          ctx.font = `bold ${speakerFontSize}px sans-serif`;
           ctx.fillStyle = '#fbbf24';
           ctx.fillText(
             `🎙️ ${speakerName.toUpperCase()}`,
@@ -363,14 +353,12 @@ export async function renderShotVideoDataUrl(
         ctx.restore();
       }
 
-      if (elapsed < totalMs) {
-        requestAnimationFrame(renderFrame);
-      } else {
+      if (elapsed >= totalMs) {
+        clearInterval(timer);
+        if (onProgress) onProgress(100);
         resolve();
       }
-    };
-
-    requestAnimationFrame(renderFrame);
+    }, 41);
   });
 
   recorder.stop();
@@ -423,6 +411,9 @@ export async function stitchVideoClipsIntoSingleVideo(
     (window as unknown as { webkitAudioContext: typeof AudioContext })
       .webkitAudioContext;
   const audioCtx = new AudioCtx();
+  if (audioCtx.state === 'suspended') {
+    await audioCtx.resume().catch(() => {});
+  }
   const dest = audioCtx.createMediaStreamDestination();
 
   const canvasStream = canvas.captureStream(24);
@@ -456,7 +447,7 @@ export async function stitchVideoClipsIntoSingleVideo(
       videoEl.playsInline = true;
       videoEl.muted = false;
 
-      let rafId = 0;
+      let timerId: ReturnType<typeof setInterval> | null = null;
       try {
         const mediaElemSource = audioCtx.createMediaElementSource(videoEl);
         mediaElemSource.connect(dest);
@@ -464,30 +455,30 @@ export async function stitchVideoClipsIntoSingleVideo(
         // Se la clip non ha traccia audio compatibile proseguiamo col video
       }
 
-      const drawLoop = () => {
-        if (!videoEl.paused && !videoEl.ended) {
-          ctx.fillStyle = '#000';
-          ctx.fillRect(0, 0, width, height);
-          ctx.drawImage(videoEl, 0, 0, width, height);
-          rafId = requestAnimationFrame(drawLoop);
-        }
-      };
-
       videoEl.onplay = () => {
-        drawLoop();
+        timerId = setInterval(() => {
+          if (!videoEl.paused && !videoEl.ended) {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(videoEl, 0, 0, width, height);
+          }
+        }, 41);
       };
 
       videoEl.onended = () => {
-        cancelAnimationFrame(rafId);
+        if (timerId) clearInterval(timerId);
         resolve();
       };
 
       videoEl.onerror = () => {
-        cancelAnimationFrame(rafId);
+        if (timerId) clearInterval(timerId);
         resolve();
       };
 
-      videoEl.play().catch(() => resolve());
+      videoEl.play().catch(() => {
+        if (timerId) clearInterval(timerId);
+        resolve();
+      });
     });
   }
 

@@ -87,6 +87,8 @@ export default function StoryboardStudioView({
   const [renderingVideoShotId, setRenderingVideoShotId] = useState<
     string | null
   >(null);
+  const [shotProgressText, setShotProgressText] = useState<string>('');
+  const [shotRenderError, setShotRenderError] = useState<string | null>(null);
   const [isStitchingFinalVideo, setIsStitchingFinalVideo] = useState(false);
   const [stitchStatus, setStitchStatus] = useState<string | null>(null);
   const [mergedEpisodePreviewUrl, setMergedEpisodePreviewUrl] = useState<
@@ -292,6 +294,8 @@ export default function StoryboardStudioView({
   // Genera la clip video di 5s per un singolo Shot dell'episodio e la salva SOLO in locale
   const handleGenerateShotVideoLocal = async (shot: Shot): Promise<string | null> => {
     setRenderingVideoShotId(shot.id);
+    setShotRenderError(null);
+    setShotProgressText('Passo 1/2: Nano Banana 2.1 sta creando le pose animate + Voce AI...');
     try {
       await handleShotChange(shot.id, { status: 'generating' });
 
@@ -321,6 +325,10 @@ export default function StoryboardStudioView({
       });
 
       const mediaData = await mediaRes.json();
+      if (!mediaRes.ok) {
+        throw new Error(mediaData.error || 'Errore API Nano Banana.');
+      }
+
       const frameImg =
         mediaData.frameImageBase64 ||
         refPhotos[0] ||
@@ -329,6 +337,8 @@ export default function StoryboardStudioView({
       if (!frameImg) {
         throw new Error('Nessuna immagine disponibile per generare la clip.');
       }
+
+      setShotProgressText('Passo 2/2: Animazione Video 5s in corso (0%)...');
 
       const clipDataUrl = await renderShotVideoDataUrl({
         frameImageBase64: frameImg,
@@ -342,6 +352,9 @@ export default function StoryboardStudioView({
         durationSeconds: 5,
         aspectRatio,
         compactForCloud: false,
+        onProgress: (pct) => {
+          setShotProgressText(`Passo 2/2: Animazione Video 5s (${pct}%)...`);
+        },
       });
 
       await saveLocalGeneratedVideo(shot.id, clipDataUrl);
@@ -353,10 +366,16 @@ export default function StoryboardStudioView({
       return clipDataUrl;
     } catch (err) {
       console.error('Errore generazione clip shot locale:', err);
+      setShotRenderError(
+        err instanceof Error
+          ? err.message
+          : 'Errore imprevisto durante la generazione della clip.'
+      );
       await handleShotChange(shot.id, { status: 'draft' });
       return null;
     } finally {
       setRenderingVideoShotId(null);
+      setShotProgressText('');
     }
   };
 
@@ -1416,10 +1435,31 @@ export default function StoryboardStudioView({
                             </span>
                           </div>
 
-                          <div className="relative z-10 flex flex-col items-center justify-center px-3 text-center">
-                            <div className="w-11 h-11 rounded-full bg-zinc-950/80 border border-violet-500/60 flex items-center justify-center text-violet-400 shadow-lg mb-1.5">
-                              <Play className="w-5 h-5 fill-current ml-0.5" />
+                          {renderingVideoShotId === shot.id && (
+                            <div className="absolute inset-0 z-30 bg-zinc-950/90 backdrop-blur-sm flex flex-col items-center justify-center p-4 text-center space-y-3">
+                              <Loader2 className="w-9 h-9 text-amber-400 animate-spin" />
+                              <span className="text-xs font-extrabold text-amber-300 leading-snug">
+                                {shotProgressText ||
+                                  'Generazione Clip Nano Banana in corso...'}
+                              </span>
+                              <span className="text-[10px] text-zinc-400">
+                                Attendi ~8 secondi: l&apos;anteprima video partirà qui automaticamente!
+                              </span>
                             </div>
+                          )}
+
+                          <div className="relative z-10 flex flex-col items-center justify-center px-3 text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleGenerateShotVideoLocal(shot)}
+                              title="Clicca per generare la clip e vedere l'anteprima video"
+                              className="w-12 h-12 rounded-full bg-violet-600 hover:bg-amber-500 border-2 border-white/30 flex items-center justify-center text-white hover:text-zinc-950 shadow-xl mb-1.5 transition transform hover:scale-110"
+                            >
+                              <Play className="w-5 h-5 fill-current ml-0.5" />
+                            </button>
+                            <span className="text-[10px] font-bold text-amber-300 bg-black/70 px-2 py-0.5 rounded mb-1">
+                              Clicca ▶ per Generare Anteprima
+                            </span>
                             <span className="text-[10px] font-medium text-zinc-300 bg-black/50 px-2 py-0.5 rounded">
                               {shot.cameraAngle}
                             </span>
@@ -1459,7 +1499,7 @@ export default function StoryboardStudioView({
                       {renderingVideoShotId === shot.id ? (
                         <>
                           <Loader2 className="w-4 h-4 animate-spin" />
-                          Nano Banana Motion + Voce (5s)...
+                          {shotProgressText || 'Nano Banana Motion + Voce (5s)...'}
                         </>
                       ) : (
                         <>
@@ -1470,6 +1510,12 @@ export default function StoryboardStudioView({
                         </>
                       )}
                     </button>
+
+                    {shotRenderError && (
+                      <div className="mt-2 w-full p-2.5 rounded-lg bg-red-950/70 border border-red-800 text-[11px] text-red-200 text-center">
+                        {shotRenderError}
+                      </div>
+                    )}
 
                     <div className="mt-2.5 w-full grid grid-cols-2 gap-2">
                       <label className="cursor-pointer py-2 px-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-semibold text-zinc-300 flex items-center justify-center gap-1.5 transition">
