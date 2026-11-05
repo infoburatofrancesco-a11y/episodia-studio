@@ -40,6 +40,7 @@ import {
   renderShotVideoDataUrl,
   stitchVideoClipsIntoSingleVideo,
   unlockSharedAudioContext,
+  normalizeVideoDataUrl,
 } from '@/lib/videoRenderer';
 
 interface SeriesHubViewProps {
@@ -1407,7 +1408,9 @@ export default function SeriesHubView({
                           </button>
                         </div>
                         <video
-                          src={activeSeries.intro.introVideoUrl}
+                          src={normalizeVideoDataUrl(
+                            activeSeries.intro.introVideoUrl
+                          )}
                           controls
                           className="w-full max-h-44 rounded-xl border border-emerald-500/30 bg-black object-contain"
                         />

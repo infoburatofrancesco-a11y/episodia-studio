@@ -34,18 +34,13 @@ import {
   renderShotVideoDataUrl,
   stitchVideoClipsIntoSingleVideo,
   unlockSharedAudioContext,
+  normalizeVideoDataUrl,
 } from '@/lib/videoRenderer';
 
-// Risolve il bug di Chrome sui file WebM generati da MediaRecorder che mostrano 0:00 / Infinity prima del play
 function fixWebmDurationOnLoad(e: React.SyntheticEvent<HTMLVideoElement>) {
   const el = e.currentTarget;
-  if (el.duration === Infinity || Number.isNaN(el.duration)) {
-    el.currentTime = 1e101;
-    const resetTime = () => {
-      el.removeEventListener('timeupdate', resetTime);
-      el.currentTime = 0;
-    };
-    el.addEventListener('timeupdate', resetTime);
+  if (el.paused && el.autoplay) {
+    el.play().catch(() => {});
   }
 }
 
@@ -596,7 +591,7 @@ export default function StoryboardStudioView({
   ) {
     playableClips.push({
       label: `SIGLA IN TESTA (0s - ${introDurationOffset}s)`,
-      videoUrl: activeSeries.intro.introVideoUrl,
+      videoUrl: normalizeVideoDataUrl(activeSeries.intro.introVideoUrl),
       subtitle: activeSeries.intro.concept || `Sigla ${activeSeries.title}`,
     });
   }
@@ -604,7 +599,7 @@ export default function StoryboardStudioView({
     if (s.videoUrl && s.videoUrl.length > 20000) {
       playableClips.push({
         label: `SHOT #${s.shotNumber} (${introDurationOffset + (s.shotNumber - 1) * 5}s - ${introDurationOffset + s.shotNumber * 5}s)`,
-        videoUrl: s.videoUrl,
+        videoUrl: normalizeVideoDataUrl(s.videoUrl),
         subtitle: s.dialogueIta,
       });
     }
@@ -1420,7 +1415,7 @@ export default function StoryboardStudioView({
                     >
                       {shot.videoUrl && shot.videoUrl.length > 20000 ? (
                         <video
-                          src={shot.videoUrl}
+                          src={normalizeVideoDataUrl(shot.videoUrl)}
                           controls
                           autoPlay
                           loop

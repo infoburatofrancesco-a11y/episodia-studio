@@ -167,13 +167,29 @@ export async function pullStateFromServer(): Promise<{
 // LOCAL-ONLY GENERATED MEDIA STORAGE (Video/Clip e Sigle salvati SOLO in locale)
 // ============================================================================
 
+// Ripara i Data URL video rimuovendo ";codecs=vp8,opus" prima di ";base64," (la virgola in "vp8,opus" rompe il tag <video> in Chrome mostrando 0:00)
+function sanitizeVideoDataUrl(url?: string | null): string | undefined {
+  if (!url) return undefined;
+  return url.replace(
+    /^data:(video\/[a-z0-9]+);[^;]+;base64,/i,
+    'data:$1;base64,'
+  );
+}
+
 export async function getLocalGeneratedMediaMap(): Promise<
   Record<string, string>
 > {
   if (typeof window === 'undefined') return {};
   try {
     const map = await get<Record<string, string>>(LOCAL_MEDIA_STORAGE_KEY);
-    return map && typeof map === 'object' ? map : {};
+    if (!map || typeof map !== 'object') return {};
+    const cleaned: Record<string, string> = {};
+    for (const [k, v] of Object.entries(map)) {
+      if (typeof v === 'string') {
+        cleaned[k] = sanitizeVideoDataUrl(v) || v;
+      }
+    }
+    return cleaned;
   } catch {
     return {};
   }
@@ -185,7 +201,7 @@ export async function saveLocalGeneratedVideo(
 ): Promise<void> {
   if (typeof window === 'undefined') return;
   const map = await getLocalGeneratedMediaMap();
-  map[mediaKey] = videoDataUrl;
+  map[mediaKey] = sanitizeVideoDataUrl(videoDataUrl) || videoDataUrl;
   await set(LOCAL_MEDIA_STORAGE_KEY, map);
 }
 
@@ -206,7 +222,7 @@ function attachLocalMediaToEpisodes(
     ...ep,
     shots: ep.shots.map((shot) => ({
       ...shot,
-      videoUrl: mediaMap[shot.id] || shot.videoUrl,
+      videoUrl: sanitizeVideoDataUrl(mediaMap[shot.id] || shot.videoUrl),
     })),
   }));
 }
@@ -224,10 +240,12 @@ function attachLocalMediaToSeries(
       ...s,
       intro: {
         ...s.intro,
-        introVideoUrl: s.intro.introVideoUrl || mediaMap[introKey],
+        introVideoUrl: sanitizeVideoDataUrl(
+          s.intro.introVideoUrl || mediaMap[introKey]
+        ),
         shots: (s.intro.shots || []).map((shot) => ({
           ...shot,
-          videoUrl: shot.videoUrl || mediaMap[shot.id],
+          videoUrl: sanitizeVideoDataUrl(shot.videoUrl || mediaMap[shot.id]),
         })),
       },
     };

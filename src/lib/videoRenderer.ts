@@ -44,15 +44,33 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
+/**
+ * Rimuove eventuali parametri ";codecs=vp8,opus" dal prefisso Data URL
+ * perché la virgola dentro "vp8,opus" prima di ";base64," rompe il parser RFC 2397 di Chrome nei tag <video>,
+ * facendo apparire il video grigio con durata 0:00!
+ */
+export function normalizeVideoDataUrl(url?: string | null): string {
+  if (!url) return '';
+  return url.replace(
+    /^data:(video\/[a-z0-9]+);[^;]+;base64,/i,
+    'data:$1;base64,'
+  );
+}
+
 function blobToDataUrl(blob: Blob): Promise<string> {
+  const cleanType = (blob.type || 'video/webm').split(';')[0] || 'video/webm';
+  const cleanBlob = new Blob([blob], { type: cleanType });
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onloadend = () => {
-      if (typeof reader.result === 'string') resolve(reader.result);
-      else reject(new Error('Conversione video Base64 fallita.'));
+      if (typeof reader.result === 'string') {
+        resolve(normalizeVideoDataUrl(reader.result));
+      } else {
+        reject(new Error('Conversione video Base64 fallita.'));
+      }
     };
     reader.onerror = reject;
-    reader.readAsDataURL(blob);
+    reader.readAsDataURL(cleanBlob);
   });
 }
 
@@ -250,7 +268,8 @@ export async function renderShotVideoDataUrl(
 
     const stopPromise = new Promise<Blob>((resolve) => {
       recorder.onstop = () => {
-        resolve(new Blob(chunks, { type: mimeType }));
+        const cleanMime = mimeType.split(';')[0] || 'video/webm';
+        resolve(new Blob(chunks, { type: cleanMime }));
       };
     });
 
@@ -517,12 +536,14 @@ export async function stitchVideoClipsIntoSingleVideo(
     };
 
     const stopPromise = new Promise<Blob>((resolve) => {
-      recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
+      const cleanMime = mimeType.split(';')[0] || 'video/webm';
+      recorder.onstop = () => resolve(new Blob(chunks, { type: cleanMime }));
     });
 
     recorder.start(100);
 
-    for (const clipUrl of videoDataUrls) {
+    for (const rawClipUrl of videoDataUrls) {
+      const clipUrl = normalizeVideoDataUrl(rawClipUrl);
       // Riproduce eventuale audio decodificato direttamente nell'AudioContext sbloccato
       if (audioCtx && audioCtx.state === 'running' && dest) {
         try {
