@@ -942,8 +942,9 @@ export default function StoryboardStudioView({
                     playableClips[currentPlaylistIdx]?.videoUrl
                   }
                   src={
-                    mergedEpisodePreviewUrl ||
-                    playableClips[currentPlaylistIdx]?.videoUrl
+                    mergedEpisodePreviewUrl
+                      ? normalizeVideoDataUrl(mergedEpisodePreviewUrl)
+                      : playableClips[currentPlaylistIdx]?.videoUrl
                   }
                   controls
                   autoPlay
@@ -1058,8 +1059,9 @@ export default function StoryboardStudioView({
                 playableClips[currentPlaylistIdx]?.videoUrl
               }
               src={
-                mergedEpisodePreviewUrl ||
-                playableClips[currentPlaylistIdx]?.videoUrl
+                mergedEpisodePreviewUrl
+                  ? normalizeVideoDataUrl(mergedEpisodePreviewUrl)
+                  : playableClips[currentPlaylistIdx]?.videoUrl
               }
               controls
               autoPlay

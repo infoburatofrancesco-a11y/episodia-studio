@@ -83,26 +83,12 @@ export async function compressImageForApi(
  * perché la virgola dentro "vp8,opus" prima di ";base64," rompe il parser RFC 2397 di Chrome nei tag <video>,
  * facendo apparire il video grigio con durata 0:00!
  */
-export function normalizeVideoDataUrl(url?: string | null): string {
-  if (!url) return '';
-  const idx = url.indexOf(';base64,');
-  if (idx >= 0) {
-    const rawBase64 = url.slice(idx + 8);
-    const isMp4 = url.slice(0, idx).includes('video/mp4');
-    return `data:${isMp4 ? 'video/mp4' : 'video/webm'};base64,${rawBase64}`;
-  }
-  return url;
-}
+// Cache in memoria dei Blob URL generati dai Data URL Base64 così i tag <video>
+// usano sempre "blob:https://..." (senza il limite di 2MB dei data: URL di Chrome che causa "Impossibile accedere al file"!)
+const blobUrlCache = new Map<string, string>();
 
-/**
- * Converte qualsiasi Data URL video in un vero Blob binario (Uint8Array) e avvia il download del file binario reale.
- * Impedisce che Chrome salvi testo Base64 ("opus;base64,...") dentro il file .webm/.mp4!
- */
-export function downloadVideoDataUrlAsBinaryFile(
-  videoDataUrl: string,
-  filename: string
-): void {
-  if (!videoDataUrl) return;
+export function dataUrlToVideoBlob(videoDataUrl: string): Blob | null {
+  if (!videoDataUrl) return null;
   try {
     const idx = videoDataUrl.indexOf(';base64,');
     const rawBase64 =
@@ -113,31 +99,103 @@ export function downloadVideoDataUrlAsBinaryFile(
     for (let i = 0; i < len; i++) {
       bytes[i] = binaryStr.charCodeAt(i);
     }
-    const isMp4 = videoDataUrl.slice(0, Math.max(0, idx)).includes('video/mp4');
-    const blob = new Blob([bytes], {
-      type: isMp4 ? 'video/mp4' : 'video/webm',
-    });
+    // Riconosce automaticamente dai magic bytes se è un WebM (0x1A 0x45 0xDF 0xA3) o un MP4 (ftyp)
+    const isWebmMagic =
+      len >= 4 &&
+      bytes[0] === 0x1a &&
+      bytes[1] === 0x45 &&
+      bytes[2] === 0xdf &&
+      bytes[3] === 0xa3;
+    const mime = isWebmMagic ? 'video/webm' : 'video/mp4';
+    return new Blob([bytes], { type: mime });
+  } catch (err) {
+    console.error('Errore conversione DataURL in Blob video:', err);
+    return null;
+  }
+}
+
+/**
+ * Converte qualsiasi Data URL video in un Blob URL ("blob:https://...") pronto per il tag <video> e per il menu "Scarica" nativo di Chrome,
+ * superando il limite di 2MB sui data: URL di Chrome che causava l'errore "Impossibile accedere al file"!
+ */
+export function normalizeVideoDataUrl(url?: string | null): string {
+  if (!url) return '';
+  if (url.startsWith('blob:') || url.startsWith('http')) {
+    return url;
+  }
+  if (typeof window === 'undefined') {
+    const idx = url.indexOf(';base64,');
+    if (idx >= 0) {
+      const rawBase64 = url.slice(idx + 8);
+      const isMp4 = url.slice(0, idx).includes('video/mp4');
+      return `data:${isMp4 ? 'video/mp4' : 'video/webm'};base64,${rawBase64}`;
+    }
+    return url;
+  }
+
+  const cacheKey = `${url.length}:${url.slice(0, 48)}:${url.slice(-48)}`;
+  const cached = blobUrlCache.get(cacheKey);
+  if (cached) return cached;
+
+  const blob = dataUrlToVideoBlob(url);
+  if (blob) {
+    const objectUrl = URL.createObjectURL(blob);
+    blobUrlCache.set(cacheKey, objectUrl);
+    return objectUrl;
+  }
+
+  return url;
+}
+
+/**
+ * Converte qualsiasi Data URL o Blob URL video in un vero file binario (.mp4 o .webm) e avvia il download.
+ */
+export function downloadVideoDataUrlAsBinaryFile(
+  videoDataUrl: string,
+  filename: string
+): void {
+  if (!videoDataUrl) return;
+  try {
+    if (videoDataUrl.startsWith('blob:')) {
+      const a = document.createElement('a');
+      a.href = videoDataUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return;
+    }
+    const blob = dataUrlToVideoBlob(videoDataUrl);
+    if (!blob) return;
+    const ext = blob.type === 'video/mp4' ? '.mp4' : '.webm';
+    const cleanFilename = filename.replace(/\.(webm|mp4)$/i, '') + ext;
     const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = blobUrl;
-    a.download = filename;
+    a.download = cleanFilename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
   } catch (err) {
     console.error('Errore download binario video:', err);
   }
 }
 
 function blobToDataUrl(blob: Blob): Promise<string> {
-  const cleanType = (blob.type || 'video/webm').split(';')[0] || 'video/webm';
+  const cleanType = (blob.type || 'video/mp4').split(';')[0] || 'video/mp4';
   const cleanBlob = new Blob([blob], { type: cleanType });
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onloadend = () => {
       if (typeof reader.result === 'string') {
-        resolve(normalizeVideoDataUrl(reader.result));
+        const res = reader.result;
+        const idx = res.indexOf(';base64,');
+        if (idx >= 0) {
+          resolve(`data:${cleanType};base64,${res.slice(idx + 8)}`);
+        } else {
+          resolve(res);
+        }
       } else {
         reject(new Error('Conversione video Base64 fallita.'));
       }
@@ -148,12 +206,15 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 }
 
 function pickSupportedVideoMimeType(): string {
-  if (typeof MediaRecorder === 'undefined') return 'video/webm';
+  if (typeof MediaRecorder === 'undefined') return 'video/mp4';
+  // Preferiamo SEMPRE MP4 (H.264/AAC) supportato nativamente da Chrome moderno, Windows Media Player, iPhone e Android!
   const candidates = [
+    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+    'video/mp4;codecs=avc1,mp4a.40.2',
+    'video/mp4',
     'video/webm;codecs=vp8,opus',
     'video/webm;codecs=vp9,opus',
     'video/webm',
-    'video/mp4',
   ];
   for (const mime of candidates) {
     if (MediaRecorder.isTypeSupported(mime)) {
