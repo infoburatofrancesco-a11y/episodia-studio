@@ -455,27 +455,40 @@ export async function renderShotVideoDataUrl(
         ctx.fillStyle = '#09090b';
         ctx.fillRect(0, 0, width, height);
 
-        // Movimento di camera naturale (senza sovrapporre 2 foto al 50% di trasparenza che creava l'effetto fantasma sdoppiato!)
-        const baseScale = 1.02 + progress * 0.04;
-        const panX = Math.sin(progress * Math.PI) * (width * 0.012);
-        const panY =
-          Math.sin(elapsed * 0.018) *
-          (height * 0.004 * (0.4 + voiceEnergy * 0.8));
-        const tiltRad = Math.sin(elapsed * 0.009) * 0.005;
+        // Regia Multi-Camera Fluida sui 10 secondi (3 stacchi cinematografici nitidi: 0-3.4s, 3.4-6.8s, 6.8-10s)
+        // Nessuna sovrapposizione al 50% (zero effetto fantasma) e nessun lampeggio rapido!
+        const numFrames = loadedFrames.length;
+        const rawSegment = progress * numFrames;
+        const activeFrameIdx = Math.min(
+          numFrames - 1,
+          Math.floor(rawSegment)
+        );
+        const segmentProgress = rawSegment - activeFrameIdx;
 
-        // Selezione nitida del fotogramma attivo (Pose 0: neutra, Pose 1: bocca aperta e gesto mentre parla, Pose 2: reazione espressiva)
-        let activeFrameIdx = 0;
-        if (loadedFrames.length > 1) {
-          const syllableSlot = Math.floor(elapsed / 260);
-          if (voiceEnergy > 0.14) {
-            // Quando il personaggio parla, alterna in modo nitido tra le pose parlate/gestuali
-            activeFrameIdx = syllableSlot % loadedFrames.length;
-          } else {
-            // Nelle pause usa la posa base o di reazione finale
-            activeFrameIdx =
-              progress > 0.78 && loadedFrames.length > 2 ? 2 : 0;
-          }
-        }
+        // Piccola spinta dinamica di zoom (whip-zoom) nei primi 120ms del cambio inquadratura
+        const cutZoomBoost =
+          activeFrameIdx > 0 && segmentProgress < 0.08
+            ? (1 - segmentProgress / 0.08) * 0.035
+            : 0;
+
+        // Movimento di camera 24fps continuo + micro-movimento naturale sincronizzato alla voce
+        const zoomDirection = activeFrameIdx % 2 === 0 ? 1 : -1;
+        const baseScale =
+          (zoomDirection > 0
+            ? 1.02 + segmentProgress * 0.055
+            : 1.075 - segmentProgress * 0.055) +
+          cutZoomBoost +
+          voiceEnergy * 0.008;
+
+        const panDir = activeFrameIdx % 2 === 0 ? 1 : -1;
+        const panX =
+          panDir *
+          Math.sin(segmentProgress * Math.PI) *
+          (width * 0.015);
+        const panY =
+          Math.sin(elapsed * 0.014) *
+          (height * 0.004 * (0.3 + voiceEnergy * 0.7));
+        const tiltRad = Math.sin(elapsed * 0.007) * 0.004;
 
         const currentFrame =
           loadedFrames[activeFrameIdx] || loadedFrames[0];

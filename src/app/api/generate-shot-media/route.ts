@@ -146,8 +146,8 @@ export async function POST(req: NextRequest) {
       }
       const variantPrompt =
         variantType === 'speaking'
-          ? `Edit this exact image in ${orientationLabel}: keep the EXACT same background, room, lighting, camera framing, and background people 100% identical. ONLY animate the main foreground character speaking expressively: mouth open mid-speech, raised eyebrows, and active hand gesture. No text overlays.`
-          : `Edit this exact image in ${orientationLabel}: keep the EXACT same background, room, lighting, camera framing, and background people 100% identical. ONLY animate the main foreground character reacting: expressive smile or comedic facial expression, slight head tilt, and shifted hand position. No text overlays.`;
+          ? `Create a photorealistic cinematic TV series frame in ${orientationLabel} continuing this exact scene in the same room and lighting with the exact same character identity and clothing: dynamic medium-close shot of the character mid-action speaking expressively with an animated hand gesture and natural movement. No text overlays.`
+          : `Create a photorealistic cinematic TV series frame in ${orientationLabel} continuing this exact scene in the same room and lighting with the exact same character identity and clothing: expressive close-up reaction shot of the character delivering the final facial expression or smile at the end of their scene. No text overlays.`;
 
       const variantFrame = await generateSingleNanoBananaFrame(
         ai,

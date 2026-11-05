@@ -10,7 +10,7 @@ import type {
 export const CAST_STORAGE_KEY = 'episodia_cast';
 export const SERIES_STORAGE_KEY = 'episodia_series';
 export const EPISODES_STORAGE_KEY = 'episodia_episodes';
-export const LOCAL_MEDIA_STORAGE_KEY = 'episodia_local_media';
+export const LOCAL_MEDIA_STORAGE_KEY = 'episodia_local_media_v4_10s';
 export const CLOUD_CONFIG_STORAGE_KEY = 'episodia_cloud_config';
 
 // ============================================================================
@@ -181,6 +181,8 @@ export async function getLocalGeneratedMediaMap(): Promise<
 > {
   if (typeof window === 'undefined') return {};
   try {
+    // Rimuove automaticamente la vecchia cache con le clip da 4-5s corrotte/sdoppiate
+    del('episodia_local_media').catch(() => {});
     const map = await get<Record<string, string>>(LOCAL_MEDIA_STORAGE_KEY);
     if (!map || typeof map !== 'object') return {};
     const cleaned: Record<string, string> = {};
@@ -220,10 +222,15 @@ function attachLocalMediaToEpisodes(
 ): Episode[] {
   return episodes.map((ep) => ({
     ...ep,
-    shots: ep.shots.map((shot) => ({
-      ...shot,
-      videoUrl: sanitizeVideoDataUrl(mediaMap[shot.id] || shot.videoUrl),
-    })),
+    shots: ep.shots.map((shot) => {
+      const validLocalUrl = sanitizeVideoDataUrl(mediaMap[shot.id]);
+      return {
+        ...shot,
+        duration: 10,
+        videoUrl: validLocalUrl,
+        status: validLocalUrl ? 'ready' : 'draft',
+      };
+    }),
   }));
 }
 
