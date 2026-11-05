@@ -39,6 +39,7 @@ import { saveLocalGeneratedVideo } from '@/lib/storage';
 import {
   renderShotVideoDataUrl,
   stitchVideoClipsIntoSingleVideo,
+  unlockSharedAudioContext,
 } from '@/lib/videoRenderer';
 
 interface SeriesHubViewProps {
@@ -261,6 +262,7 @@ export default function SeriesHubView({
 
   // Genera direttamente il Video Sigla (max 15s) con AI (Gemini Image + TTS + Canvas Video) e lo salva sul Database Cloud Supabase
   const handleRenderIntroVideoToCloud = async (targetSeries: Series) => {
+    unlockSharedAudioContext();
     setIntroError(null);
     const seriesCast = cast.filter((c) => targetSeries.castIds.includes(c.id));
     const effectiveCast = seriesCast.length > 0 ? seriesCast : cast;

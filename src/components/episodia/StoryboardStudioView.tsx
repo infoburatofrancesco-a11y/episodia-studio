@@ -33,7 +33,21 @@ import { saveLocalGeneratedVideo } from '@/lib/storage';
 import {
   renderShotVideoDataUrl,
   stitchVideoClipsIntoSingleVideo,
+  unlockSharedAudioContext,
 } from '@/lib/videoRenderer';
+
+// Risolve il bug di Chrome sui file WebM generati da MediaRecorder che mostrano 0:00 / Infinity prima del play
+function fixWebmDurationOnLoad(e: React.SyntheticEvent<HTMLVideoElement>) {
+  const el = e.currentTarget;
+  if (el.duration === Infinity || Number.isNaN(el.duration)) {
+    el.currentTime = 1e101;
+    const resetTime = () => {
+      el.removeEventListener('timeupdate', resetTime);
+      el.currentTime = 0;
+    };
+    el.addEventListener('timeupdate', resetTime);
+  }
+}
 
 interface StoryboardStudioViewProps {
   seriesList: Series[];
@@ -293,6 +307,7 @@ export default function StoryboardStudioView({
 
   // Genera la clip video di 5s per un singolo Shot dell'episodio e la salva SOLO in locale
   const handleGenerateShotVideoLocal = async (shot: Shot): Promise<string | null> => {
+    unlockSharedAudioContext();
     setRenderingVideoShotId(shot.id);
     setShotRenderError(null);
     setShotProgressText('Passo 1/2: Nano Banana 2.1 sta creando le pose animate + Voce AI...');
@@ -329,21 +344,6 @@ export default function StoryboardStudioView({
         throw new Error(mediaData.error || 'Errore API Nano Banana.');
       }
 
-      if (mediaData.vertexNotice) {
-        setShotRenderError(mediaData.vertexNotice);
-      }
-
-      // Se Google Veo 3 (Vertex AI) ha restituito il video MP4 fluido nativo dal frame di Nano Banana, usiamo quello!
-      if (mediaData.veoVideoBase64) {
-        await saveLocalGeneratedVideo(shot.id, mediaData.veoVideoBase64);
-        await handleShotChange(shot.id, {
-          videoUrl: mediaData.veoVideoBase64,
-          localMediaKey: shot.id,
-          status: 'ready',
-        });
-        return mediaData.veoVideoBase64;
-      }
-
       const frameImg =
         mediaData.frameImageBase64 ||
         refPhotos[0] ||
@@ -378,6 +378,7 @@ export default function StoryboardStudioView({
         localMediaKey: shot.id,
         status: 'ready',
       });
+      setMergedEpisodePreviewUrl(null);
       return clipDataUrl;
     } catch (err) {
       console.error('Errore generazione clip shot locale:', err);
@@ -394,11 +395,12 @@ export default function StoryboardStudioView({
     }
   };
 
-  // Genera eventuali shot mancanti con Nano Banana, UNISCE in testa il Video Sigla dal Database Cloud (0s-15s)
-  // e mostra subito l'ANTEPRIMA VIDEO COMPLETA NELL'APP (con possibilità di scaricarla alla fine)!
+  // Genera gli shot con Nano Banana, prepara l'ANTEPRIMA VIDEO COMPLETA NELL'APP
+  // e, quando richiesto (downloadImmediately = true), unisce e scarica il file unico!
   const handleRenderAndMergeCompleteLocalVideo = async (
     downloadImmediately = false
   ) => {
+    unlockSharedAudioContext();
     setIsStitchingFinalVideo(true);
     try {
       const clipsToMerge: string[] = [];
@@ -416,12 +418,17 @@ export default function StoryboardStudioView({
         });
       }
 
-      // 2. Per ogni Shot della puntata, usa la clip locale già pronta o generala con Nano Banana
+      // 2. Per ogni Shot della puntata, usa la clip locale valida o generala con Nano Banana
       const updatedShots = [...activeEpisode.shots];
+      const allAlreadyHaveClips = updatedShots.every(
+        (s) => s.videoUrl && s.videoUrl.length > 20000
+      );
+
       for (let i = 0; i < updatedShots.length; i++) {
         const s = updatedShots[i];
         let clipUrl: string | undefined | null = s.videoUrl;
-        if (!clipUrl) {
+        // Se non c'è una clip valida (>20KB) oppure l'utente ha cliccato "Genera Video" per rigenerare
+        if (!clipUrl || clipUrl.length < 20000 || (!downloadImmediately && allAlreadyHaveClips)) {
           setStitchStatus(
             `Nano Banana AI: Generazione pose movimento + voce Shot #${s.shotNumber}/${updatedShots.length} (5s)...`
           );
@@ -445,14 +452,16 @@ export default function StoryboardStudioView({
         shots: updatedShots,
       });
 
-      if (clipsToMerge.length === 0) {
+      setCurrentPlaylistIdx(0);
+
+      if (!downloadImmediately || clipsToMerge.length === 0) {
         return;
       }
 
       setStitchStatus(
         hasActiveIntro && activeSeries.intro?.introVideoUrl
-          ? `Montaggio anteprima: Sigla Cloud (${introDurationOffset}s in testa) + Puntata...`
-          : 'Montaggio anteprima video completa...'
+          ? `Esportazione file unico: Sigla Cloud (${introDurationOffset}s in testa) + Puntata...`
+          : 'Esportazione file video finale unico...'
       );
 
       const mergedFinalVideoUrl = await stitchVideoClipsIntoSingleVideo(
@@ -463,14 +472,11 @@ export default function StoryboardStudioView({
 
       const finalKey = `final-ep-${activeEpisode.id}`;
       await saveLocalGeneratedVideo(finalKey, mergedFinalVideoUrl);
-      setMergedEpisodePreviewUrl(mergedFinalVideoUrl);
 
-      if (downloadImmediately) {
-        const a = document.createElement('a');
-        a.href = mergedFinalVideoUrl;
-        a.download = `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_COMPLETO_CON_SIGLA.webm`;
-        a.click();
-      }
+      const a = document.createElement('a');
+      a.href = mergedFinalVideoUrl;
+      a.download = `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_COMPLETO_CON_SIGLA.webm`;
+      a.click();
     } catch (err) {
       console.error('Errore unione video finale con sigla:', err);
     } finally {
@@ -583,7 +589,11 @@ export default function StoryboardStudioView({
     videoUrl: string;
     subtitle: string;
   }> = [];
-  if (hasActiveIntro && activeSeries.intro?.introVideoUrl) {
+  if (
+    hasActiveIntro &&
+    activeSeries.intro?.introVideoUrl &&
+    activeSeries.intro.introVideoUrl.length > 20000
+  ) {
     playableClips.push({
       label: `SIGLA IN TESTA (0s - ${introDurationOffset}s)`,
       videoUrl: activeSeries.intro.introVideoUrl,
@@ -591,7 +601,7 @@ export default function StoryboardStudioView({
     });
   }
   activeEpisode.shots.forEach((s) => {
-    if (s.videoUrl) {
+    if (s.videoUrl && s.videoUrl.length > 20000) {
       playableClips.push({
         label: `SHOT #${s.shotNumber} (${introDurationOffset + (s.shotNumber - 1) * 5}s - ${introDurationOffset + s.shotNumber * 5}s)`,
         videoUrl: s.videoUrl,
@@ -893,6 +903,7 @@ export default function StoryboardStudioView({
                   controls
                   autoPlay
                   playsInline
+                  onLoadedMetadata={fixWebmDurationOnLoad}
                   onEnded={() => {
                     if (
                       !mergedEpisodePreviewUrl &&
@@ -1006,7 +1017,9 @@ export default function StoryboardStudioView({
                 playableClips[currentPlaylistIdx]?.videoUrl
               }
               controls
+              autoPlay
               playsInline
+              onLoadedMetadata={fixWebmDurationOnLoad}
               onEnded={() => {
                 if (
                   !mergedEpisodePreviewUrl &&
@@ -1405,13 +1418,14 @@ export default function StoryboardStudioView({
                           : 'aspect-video'
                       }`}
                     >
-                      {shot.videoUrl ? (
+                      {shot.videoUrl && shot.videoUrl.length > 20000 ? (
                         <video
                           src={shot.videoUrl}
                           controls
                           autoPlay
                           loop
                           playsInline
+                          onLoadedMetadata={fixWebmDurationOnLoad}
                           className="absolute inset-0 w-full h-full object-cover z-20"
                         />
                       ) : (
