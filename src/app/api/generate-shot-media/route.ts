@@ -5,6 +5,9 @@ import { GoogleGenAI } from '@google/genai';
 export const maxDuration = 60;
 
 interface GenerateShotMediaBody {
+  step?: 'base' | 'variant';
+  baseFrameBase64?: string;
+  variantType?: 'speaking' | 'reaction';
   visualPromptEn: string;
   dialogueIta?: string;
   speakerName?: string;
@@ -69,10 +72,10 @@ async function generateSingleNanoBananaFrame(
   promptText: string
 ): Promise<string | null> {
   const nanoBananaModels = [
-    'gemini-nano-banana-2.1',
-    'nano-banana-pro-preview',
     'gemini-3.1-flash-image',
+    'gemini-nano-banana-2.1',
     'gemini-2.5-flash-image',
+    'nano-banana-pro-preview',
   ];
 
   for (const modelName of nanoBananaModels) {
@@ -118,6 +121,9 @@ export async function POST(req: NextRequest) {
 
     const body = (await req.json()) as GenerateShotMediaBody;
     const {
+      step = 'base',
+      baseFrameBase64,
+      variantType = 'speaking',
       visualPromptEn,
       dialogueIta,
       speakerName,
@@ -127,9 +133,45 @@ export async function POST(req: NextRequest) {
 
     const ai = new GoogleGenAI({ apiKey });
 
+    const orientationLabel =
+      aspectRatio === '9:16'
+        ? 'vertical 9:16 portrait smartphone social format'
+        : 'horizontal 16:9 widescreen cinematic format';
+
+    // PASSO VARIANTE: modifica il Frame 1 già generato mantenendo lo stesso identico sfondo (1 sola chiamata veloce < 8s)
+    if (step === 'variant' && baseFrameBase64) {
+      const parsedBase = parseDataUrl(baseFrameBase64);
+      if (!parsedBase) {
+        return NextResponse.json({ frameImageBase64: null });
+      }
+      const variantPrompt =
+        variantType === 'speaking'
+          ? `Edit this exact image in ${orientationLabel}: keep the EXACT same background, room, lighting, camera framing, and background people 100% identical. ONLY animate the main foreground character speaking expressively: mouth open mid-speech, raised eyebrows, and active hand gesture. No text overlays.`
+          : `Edit this exact image in ${orientationLabel}: keep the EXACT same background, room, lighting, camera framing, and background people 100% identical. ONLY animate the main foreground character reacting: expressive smile or comedic facial expression, slight head tilt, and shifted hand position. No text overlays.`;
+
+      const variantFrame = await generateSingleNanoBananaFrame(
+        ai,
+        [
+          {
+            inlineData: {
+              mimeType: parsedBase.mimeType,
+              data: parsedBase.data,
+            },
+          },
+        ],
+        variantPrompt
+      );
+
+      return NextResponse.json({
+        frameImageBase64: variantFrame,
+        modelUsed: 'gemini-nano-banana-2.1',
+      });
+    }
+
+    // PASSO BASE: 1 sola chiamata immagine + 1 chiamata TTS in parallelo (< 8 secondi totali, mai timeout su Vercel!)
     const refParts: Array<{ inlineData: { mimeType: string; data: string } }> =
       [];
-    for (const refImg of referenceImagesBase64.slice(0, 2)) {
+    for (const refImg of referenceImagesBase64.slice(0, 1)) {
       const parsed = parseDataUrl(refImg);
       if (parsed) {
         refParts.push({
@@ -141,56 +183,10 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const orientationLabel =
-      aspectRatio === '9:16'
-        ? 'vertical 9:16 portrait smartphone social format'
-        : 'horizontal 16:9 widescreen cinematic format';
+    const masterPrompt = `Generate a photorealistic cinematic TV series frame in ${orientationLabel}. Keep the exact face and identity of the reference character photo. Scene: ${visualPromptEn}. Natural posture, expressive face, looking at camera. No text overlays, no watermarks.`;
 
-    const masterPrompt = `Generate a photorealistic cinematic TV series frame in ${orientationLabel}. Keep the exact face and identity of the reference character photo(s). Scene: ${visualPromptEn}. Natural posture, expressive face, looking at camera. No text overlays, no watermarks.`;
-
-    // Eseguiamo in parallelo:
-    // A) La sequenza coerente Nano Banana (Frame 1 Master -> Frame 2 Parlato & Gesto + Frame 3 Reazione derivati dallo STESSO Frame 1 per bloccare lo sfondo!)
-    // B) La sintesi vocale TTS della SOLA battuta del personaggio (senza istruzioni testuali lette ad alta voce!)
-    const [framesBase64, audioWavBase64] = await Promise.all([
-      (async (): Promise<string[]> => {
-        const frame1 = await generateSingleNanoBananaFrame(
-          ai,
-          refParts,
-          masterPrompt
-        );
-        if (!frame1) {
-          return referenceImagesBase64.slice(0, 2);
-        }
-
-        const parsedFrame1 = parseDataUrl(frame1);
-        if (!parsedFrame1) {
-          return [frame1];
-        }
-
-        const frame1Part = [
-          {
-            inlineData: {
-              mimeType: parsedFrame1.mimeType,
-              data: parsedFrame1.data,
-            },
-          },
-        ];
-
-        const [frame2, frame3] = await Promise.all([
-          generateSingleNanoBananaFrame(
-            ai,
-            frame1Part,
-            `Edit this exact image in ${orientationLabel}: keep the EXACT same background, room, lighting, camera position, and background characters 100% identical. ONLY animate the main foreground character speaking: mouth open mid-speech, expressive eyebrows, and active hand gesture. No text overlays.`
-          ),
-          generateSingleNanoBananaFrame(
-            ai,
-            frame1Part,
-            `Edit this exact image in ${orientationLabel}: keep the EXACT same background, room, lighting, camera position, and background characters 100% identical. ONLY animate the main foreground character reacting: expressive smile or comedic expression, slight head tilt, and shifted hand position. No text overlays.`
-          ),
-        ]);
-
-        return [frame1, frame2, frame3].filter((f): f is string => Boolean(f));
-      })(),
+    const [frame1, audioWavBase64] = await Promise.all([
+      generateSingleNanoBananaFrame(ai, refParts, masterPrompt),
       (async (): Promise<string | null> => {
         if (!dialogueIta || !dialogueIta.trim()) return null;
         // Puliamo eventuali virgolette esterne così il TTS legge ESCLUSIVAMENTE la battuta del personaggio!
@@ -250,6 +246,10 @@ export async function POST(req: NextRequest) {
         return null;
       })(),
     ]);
+
+    const framesBase64 = frame1
+      ? [frame1]
+      : referenceImagesBase64.slice(0, 1);
 
     return NextResponse.json({
       frameImageBase64: framesBase64[0] || null,

@@ -36,6 +36,7 @@ import {
   unlockSharedAudioContext,
   normalizeVideoDataUrl,
   downloadVideoDataUrlAsBinaryFile,
+  compressImageForApi,
 } from '@/lib/videoRenderer';
 
 function fixWebmDurationOnLoad(e: React.SyntheticEvent<HTMLVideoElement>) {
@@ -177,7 +178,7 @@ export default function StoryboardStudioView({
     : 0;
 
   const totalEpisodeDurationWithIntro =
-    introDurationOffset + activeEpisode.shots.length * 5;
+    introDurationOffset + activeEpisode.shots.length * 10;
 
   const markSaved = () => {
     setLastSavedAt(
@@ -301,70 +302,116 @@ export default function StoryboardStudioView({
     );
   };
 
-  // Genera la clip video di 5s per un singolo Shot dell'episodio e la salva SOLO in locale
+  // Genera la clip video di 10s per un singolo Shot dell'episodio e la salva SOLO in locale
   const handleGenerateShotVideoLocal = async (shot: Shot): Promise<string | null> => {
     unlockSharedAudioContext();
     setRenderingVideoShotId(shot.id);
     setShotRenderError(null);
-    setShotProgressText('Passo 1/2: Nano Banana 2.1 sta creando le pose animate + Voce AI...');
+    setShotProgressText('Passo 1/3: Nano Banana sta generando Scena + Voce AI...');
     try {
-      await handleShotChange(shot.id, { status: 'generating' });
+      await handleShotChange(shot.id, { status: 'generating', duration: 10 });
 
       const speaker = shot.speakerId ? castMap.get(shot.speakerId) : null;
       const shotChars = shot.characterIds
         .map((id) => castMap.get(id))
         .filter((c): c is Character => Boolean(c));
       const effectiveChars = shotChars.length > 0 ? shotChars : cast;
-      const refPhotos = effectiveChars.flatMap((c) =>
-        c.referenceImagesBase64 && c.referenceImagesBase64.length > 0
-          ? [c.referenceImagesBase64[0]]
-          : [c.referenceImageBase64]
-      );
+      const rawRefPhoto =
+        effectiveChars[0]?.referenceImagesBase64?.[0] ||
+        effectiveChars[0]?.referenceImageBase64 ||
+        cast[0]?.referenceImageBase64;
 
+      const compressedRef = rawRefPhoto
+        ? await compressImageForApi(rawRefPhoto, 512)
+        : undefined;
+
+      // CHIAMATA 1 (Veloce < 8s): Scena Base + Voce Italiana in parallelo
       const mediaRes = await fetch('/api/generate-shot-media', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          step: 'base',
           visualPromptEn: shot.visualPromptEn,
           dialogueIta: shot.dialogueIta,
           speakerName: speaker?.name,
           speakerCategory: speaker?.category || 'human',
           aspectRatio,
-          referenceImagesBase64: refPhotos,
+          referenceImagesBase64: compressedRef ? [compressedRef] : [],
           shotNumber: shot.shotNumber,
         }),
       });
 
-      const mediaData = await mediaRes.json();
+      const rawText = await mediaRes.text();
+      let mediaData: {
+        frameImageBase64?: string | null;
+        framesBase64?: string[];
+        audioWavBase64?: string | null;
+        error?: string;
+      } = {};
+      try {
+        mediaData = JSON.parse(rawText);
+      } catch {
+        throw new Error(
+          `Il server ha impiegato troppo tempo a rispondere (${mediaRes.status}). Riprova tra un istante.`
+        );
+      }
+
       if (!mediaRes.ok) {
         throw new Error(mediaData.error || 'Errore API Nano Banana.');
       }
 
-      const frameImg =
+      const frame1 =
         mediaData.frameImageBase64 ||
-        refPhotos[0] ||
+        rawRefPhoto ||
         cast[0]?.referenceImageBase64;
 
-      if (!frameImg) {
+      if (!frame1) {
         throw new Error('Nessuna immagine disponibile per generare la clip.');
       }
 
-      setShotProgressText('Passo 2/2: Animazione Video 5s in corso (0%)...');
+      const framesList: string[] = [frame1];
+
+      // CHIAMATA 2 (Separata e veloce < 7s): Posa Parlata in movimento dallo stesso Frame 1
+      try {
+        setShotProgressText(
+          'Passo 2/3: Nano Banana sta animando la posa parlata del personaggio...'
+        );
+        const compressedFrame1 = await compressImageForApi(frame1, 512);
+        const variantRes = await fetch('/api/generate-shot-media', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            step: 'variant',
+            baseFrameBase64: compressedFrame1,
+            variantType: 'speaking',
+            visualPromptEn: shot.visualPromptEn,
+            aspectRatio,
+          }),
+        });
+        if (variantRes.ok) {
+          const variantJson = await variantRes.json();
+          if (variantJson.frameImageBase64) {
+            framesList.push(variantJson.frameImageBase64);
+          }
+        }
+      } catch {
+        // Se la seconda chiamata opzionale rallenta, proseguiamo subito con il Frame 1 + Voce!
+      }
+
+      setShotProgressText('Passo 3/3: Registrazione Video 10s (0%)...');
 
       const clipDataUrl = await renderShotVideoDataUrl({
-        frameImageBase64: frameImg,
-        framesBase64: Array.isArray(mediaData.framesBase64)
-          ? mediaData.framesBase64
-          : undefined,
+        frameImageBase64: frame1,
+        framesBase64: framesList,
         audioWavBase64: mediaData.audioWavBase64,
         dialogueIta: shot.dialogueIta,
         speakerName: speaker?.name,
         shotLabel: `EP. #${activeEpisode.episodeNumber} • SHOT #${shot.shotNumber}`,
-        durationSeconds: 5,
+        durationSeconds: 10,
         aspectRatio,
         compactForCloud: false,
         onProgress: (pct) => {
-          setShotProgressText(`Passo 2/2: Animazione Video 5s (${pct}%)...`);
+          setShotProgressText(`Passo 3/3: Registrazione Video 10s (${pct}%)...`);
         },
       });
 
@@ -372,6 +419,7 @@ export default function StoryboardStudioView({
       await handleShotChange(shot.id, {
         videoUrl: clipDataUrl,
         localMediaKey: shot.id,
+        duration: 10,
         status: 'ready',
       });
       setMergedEpisodePreviewUrl(null);
@@ -426,7 +474,7 @@ export default function StoryboardStudioView({
         // Se non c'è una clip valida (>20KB) oppure l'utente ha cliccato "Genera Video" per rigenerare
         if (!clipUrl || clipUrl.length < 20000 || (!downloadImmediately && allAlreadyHaveClips)) {
           setStitchStatus(
-            `Nano Banana AI: Generazione pose movimento + voce Shot #${s.shotNumber}/${updatedShots.length} (5s)...`
+            `Nano Banana AI: Generazione pose movimento + voce Shot #${s.shotNumber}/${updatedShots.length} (10s)...`
           );
           clipUrl = await handleGenerateShotVideoLocal(s);
           if (clipUrl) {
@@ -434,6 +482,7 @@ export default function StoryboardStudioView({
               ...s,
               videoUrl: clipUrl,
               localMediaKey: s.id,
+              duration: 10,
               status: 'ready',
             };
           }
@@ -509,8 +558,8 @@ export default function StoryboardStudioView({
         : null,
       episodeShots: activeEpisode.shots.map((s) => ({
         ...s,
-        startTimeSeconds: introDurationOffset + (s.shotNumber - 1) * 5,
-        endTimeSeconds: introDurationOffset + s.shotNumber * 5,
+        startTimeSeconds: introDurationOffset + (s.shotNumber - 1) * 10,
+        endTimeSeconds: introDurationOffset + s.shotNumber * 10,
       })),
       totalDurationSeconds: totalEpisodeDurationWithIntro,
       exportedAt: new Date().toISOString(),
@@ -599,7 +648,7 @@ export default function StoryboardStudioView({
   activeEpisode.shots.forEach((s) => {
     if (s.videoUrl && s.videoUrl.length > 20000) {
       playableClips.push({
-        label: `SHOT #${s.shotNumber} (${introDurationOffset + (s.shotNumber - 1) * 5}s - ${introDurationOffset + s.shotNumber * 5}s)`,
+        label: `SHOT #${s.shotNumber} (${introDurationOffset + (s.shotNumber - 1) * 10}s - ${introDurationOffset + s.shotNumber * 10}s)`,
         videoUrl: normalizeVideoDataUrl(s.videoUrl),
         subtitle: s.dialogueIta,
       });
@@ -647,7 +696,7 @@ export default function StoryboardStudioView({
               <Clock className="w-3 h-3" />
               {totalEpisodeDurationWithIntro}s Totali
               {hasActiveIntro
-                ? ` (${introDurationOffset}s Sigla + ${activeEpisode.shots.length * 5}s Puntata)`
+                ? ` (${introDurationOffset}s Sigla + ${activeEpisode.shots.length * 10}s Puntata)`
                 : ''}
             </span>
           </div>
@@ -867,14 +916,14 @@ export default function StoryboardStudioView({
                   <div>
                     <span className="text-xs font-bold text-violet-300">
                       SHOT #{s.shotNumber} (
-                      {introDurationOffset + (s.shotNumber - 1) * 5}s –{' '}
-                      {introDurationOffset + s.shotNumber * 5}s)
+                      {introDurationOffset + (s.shotNumber - 1) * 10}s –{' '}
+                      {introDurationOffset + s.shotNumber * 10}s)
                     </span>
                     <p className="text-[11px] text-zinc-400 truncate max-w-md">
                       {s.dialogueIta || s.cameraAngle}
                     </p>
                   </div>
-                  <span className="text-xs font-mono text-zinc-400">5s</span>
+                  <span className="text-xs font-mono text-zinc-400">10s</span>
                 </div>
               ))}
             </div>
@@ -1093,8 +1142,8 @@ export default function StoryboardStudioView({
       <div className="space-y-6">
         {activeEpisode.shots.map((shot) => {
           const wordCount = countWords(shot.dialogueIta);
-          const isWordCountOptimal = wordCount <= 15;
-          const isWordCountWarning = wordCount > 15 && wordCount <= 20;
+          const isWordCountOptimal = wordCount <= 30;
+          const isWordCountWarning = wordCount > 30 && wordCount <= 40;
           const speakerChar = shot.speakerId
             ? castMap.get(shot.speakerId)
             : null;
@@ -1103,8 +1152,8 @@ export default function StoryboardStudioView({
             .filter((c): c is Character => Boolean(c));
           const isRegeneratingThisShot = regeneratingShotId === shot.id;
 
-          const startSec = introDurationOffset + (shot.shotNumber - 1) * 5;
-          const endSec = introDurationOffset + shot.shotNumber * 5;
+          const startSec = introDurationOffset + (shot.shotNumber - 1) * 10;
+          const endSec = introDurationOffset + shot.shotNumber * 10;
 
           return (
             <div
@@ -1118,7 +1167,7 @@ export default function StoryboardStudioView({
                     SHOT #{shot.shotNumber}
                   </span>
                   <span className="text-xs font-mono text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2.5 py-0.5 rounded-md">
-                    {startSec}s – {endSec}s ({shot.duration}s)
+                    {startSec}s – {endSec}s (10s)
                   </span>
                   <span className="text-xs text-zinc-400 hidden sm:inline">
                     • {shot.cameraAngle}
@@ -1309,10 +1358,10 @@ export default function StoryboardStudioView({
                         <span>
                           {wordCount} parole{' '}
                           {isWordCountOptimal
-                            ? '(Ottimale per 5s)'
+                            ? '(Ottimale per 10s)'
                             : isWordCountWarning
-                            ? '(Al limite per 5s)'
-                            : '(Troppo lungo per 5s: max ~15 parole)'}
+                            ? '(Al limite per 10s)'
+                            : '(Troppo lungo per 10s: max ~30 parole)'}
                         </span>
                       </div>
                     </div>
@@ -1325,7 +1374,7 @@ export default function StoryboardStudioView({
                           dialogueIta: e.target.value,
                         })
                       }
-                      placeholder="Inserisci la battuta in italiano pronunciata dal personaggio in questi 5 secondi..."
+                      placeholder="Inserisci la battuta in italiano pronunciata dal personaggio in questi 10 secondi..."
                       className="w-full rounded-xl bg-zinc-950 border border-zinc-800 p-3.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500 transition"
                     />
                   </div>
@@ -1403,7 +1452,7 @@ export default function StoryboardStudioView({
                         Monitor Studio ({aspectRatio})
                       </span>
                       <span className="font-mono text-amber-400">
-                        {shot.duration}.0s @ 24fps
+                        10.0s @ 24fps
                       </span>
                     </div>
 
@@ -1456,7 +1505,7 @@ export default function StoryboardStudioView({
                               CAM {shot.shotNumber}
                             </span>
                             <span className="px-1.5 py-0.5 rounded bg-red-600/80 text-white font-bold">
-                              REC • 00:05
+                              REC • 00:10
                             </span>
                           </div>
 
@@ -1465,10 +1514,10 @@ export default function StoryboardStudioView({
                               <Loader2 className="w-9 h-9 text-amber-400 animate-spin" />
                               <span className="text-xs font-extrabold text-amber-300 leading-snug">
                                 {shotProgressText ||
-                                  'Generazione Clip Nano Banana in corso...'}
+                                  'Generazione Clip Nano Banana (10s) in corso...'}
                               </span>
                               <span className="text-[10px] text-zinc-400">
-                                Attendi ~8 secondi: l&apos;anteprima video partirà qui automaticamente!
+                                L&apos;anteprima video di 10s partirà qui automaticamente!
                               </span>
                             </div>
                           )}
@@ -1524,14 +1573,14 @@ export default function StoryboardStudioView({
                       {renderingVideoShotId === shot.id ? (
                         <>
                           <Loader2 className="w-4 h-4 animate-spin" />
-                          {shotProgressText || 'Nano Banana Motion + Voce (5s)...'}
+                          {shotProgressText || 'Nano Banana Motion + Voce (10s)...'}
                         </>
                       ) : (
                         <>
                           <Sparkles className="w-4 h-4" />
                           {shot.videoUrl
-                            ? 'Rigenera Clip con Nano Banana (5s)'
-                            : 'Genera Clip con Nano Banana (5s - Anteprima)'}
+                            ? 'Rigenera Clip con Nano Banana (10s)'
+                            : 'Genera Clip con Nano Banana (10s - Anteprima)'}
                         </>
                       )}
                     </button>

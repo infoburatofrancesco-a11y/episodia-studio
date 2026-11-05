@@ -189,7 +189,7 @@ export default function WritersRoomView({
       (_, idx) => ({
         id: `shot-${Date.now()}-${idx + 1}`,
         shotNumber: idx + 1,
-        duration: 5,
+        duration: 10,
         characterIds: fallbackCastIds,
         cameraAngle: 'Medium selfie shot, handheld camera',
         visualPromptEn: '',
@@ -377,8 +377,8 @@ export default function WritersRoomView({
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-zinc-300">
               <Clock className="w-4 h-4 text-amber-400" />
               <span>
-                <strong className="text-amber-400">{shotCount * 5}s</strong> (
-                {shotCount} shot)
+                <strong className="text-amber-400">{shotCount * 10}s</strong> (
+                {shotCount} shot da 10s)
               </span>
             </div>
           </div>
@@ -529,7 +529,7 @@ export default function WritersRoomView({
 
             <div className="md:col-span-5">
               <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">
-                3. Inquadrature (3 - 6 Shot da 5s) *
+                3. Inquadrature (3 - 6 Clip da 10s) *
               </label>
               <div className="grid grid-cols-4 gap-2">
                 {[3, 4, 5, 6].map((num) => (
@@ -545,7 +545,7 @@ export default function WritersRoomView({
                   >
                     <span>{num} Shot</span>
                     <span className="text-[10px] font-normal opacity-75">
-                      {num * 5} sec
+                      {num * 10} sec
                     </span>
                   </button>
                 ))}

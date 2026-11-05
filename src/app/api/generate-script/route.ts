@@ -11,7 +11,7 @@ const shotSchema: Schema = {
     },
     duration: {
       type: Type.INTEGER,
-      description: 'Duration of the shot in seconds (always 5).',
+      description: 'Duration of the shot in seconds (always 10).',
     },
     characterIds: {
       type: Type.ARRAY,
@@ -26,18 +26,18 @@ const shotSchema: Schema = {
     visualPromptEn: {
       type: Type.STRING,
       description:
-        'Hyper-detailed visual prompt in ENGLISH for an Image-to-Video model. MUST faithfully incorporate the exact visualDescriptor of every character present in the shot, plus realistic 5-second physical actions, setting details, and who is speaking with what facial expression.',
+        'Hyper-detailed visual prompt in ENGLISH for an Image-to-Video model. MUST faithfully incorporate the exact visualDescriptor of every character present in the shot, plus realistic 10-second physical actions, setting details, and who is speaking with what facial expression.',
     },
     speakerId: {
       type: Type.STRING,
       nullable: true,
       description:
-        'Exact character ID of the single character speaking in this 5-second shot, or null if the shot is a silent reaction/action.',
+        'Exact character ID of the single character speaking in this 10-second shot, or null if the shot is a silent reaction/action.',
     },
     dialogueIta: {
       type: Type.STRING,
       description:
-        'Snappy, natural comedy line in ITALIAN spoken by speakerId (sized to fit naturally within 5 seconds, approx. 8-16 words), faithful to their personality and catchphrases. Empty string if speakerId is null.',
+        'Snappy, natural comedy line in ITALIAN spoken by speakerId (sized to fit naturally within 10 seconds, approx. 16-30 words), faithful to their personality and catchphrases. Empty string if speakerId is null.',
     },
   },
   required: [
@@ -106,7 +106,7 @@ function buildFallbackShots(
     return {
       id: `shot-${Date.now()}-${idx + 1}`,
       shotNumber: idx + 1,
-      duration: 5,
+      duration: 10,
       characterIds: presentChars,
       cameraAngle,
       visualPromptEn: `${cameraAngle}. ${descriptors}. Scene context: ${logline.slice(0, 120)}. ${speaker.name} is speaking expressively to the camera with animated gestures.`,
@@ -172,18 +172,18 @@ export async function POST(req: NextRequest) {
       .join('\n\n');
 
     const systemInstruction = `You are a brilliant TV & Social Series (Reels/TikTok) Sitcom Screenwriter and AI Video Director.
-You write tight, hilarious, high-rhythm micro-episodes divided into sequential 5-second shots.
+You write tight, hilarious, high-rhythm micro-episodes divided into sequential 10-second shots.
 
 STRICT PRODUCTION RULES:
-1. Generate EXACTLY ${clampedShotCount} sequential shots (shotNumber 1 to ${clampedShotCount}), each with duration = 5.
+1. Generate EXACTLY ${clampedShotCount} sequential shots (shotNumber 1 to ${clampedShotCount}), each with duration = 10.
 2. Only use character IDs from the provided CAST ROSTER in "characterIds" and "speakerId".
-3. For EVERY shot, the field "visualPromptEn" MUST be written in ENGLISH and MUST faithfully INCORPORATE the exact "Visual Descriptor" of every character present in that shot, followed by realistic 5-second physical movements, environment details, camera lighting, and explicitly stating who is speaking (or reacting) and with what facial expression.
-4. For EVERY shot, the field "dialogueIta" MUST be written in natural, witty, rhythmic ITALIAN, strictly matching the speaking character's "Personality & Voice" (including their tone or catchphrases when fitting). Keep each line concise (approx. 8-15 words) so it can be spoken naturally in 5 seconds.
+3. For EVERY shot, the field "visualPromptEn" MUST be written in ENGLISH and MUST faithfully INCORPORATE the exact "Visual Descriptor" of every character present in that shot, followed by realistic 10-second physical movements, environment details, camera lighting, and explicitly stating who is speaking (or reacting) and with what facial expression.
+4. For EVERY shot, the field "dialogueIta" MUST be written in natural, witty, rhythmic ITALIAN, strictly matching the speaking character's "Personality & Voice" (including their tone or catchphrases when fitting). Keep each line around 16-30 words so it can be spoken naturally in a 10-second clip.
 5. Build a clear comedic escalation across the ${clampedShotCount} shots ending with a punchline or hilarious reaction in the final shot.`;
 
     const userPrompt = `EPISODE TITLE: "${title}"
 COMEDIC SITUATION / LOGLINE: "${logline}"
-NUMBER OF 5-SECOND SHOTS REQUIRED: ${clampedShotCount}
+NUMBER OF 10-SECOND SHOTS REQUIRED: ${clampedShotCount}
 
 CAST ROSTER AVAILABLE IN THIS EPISODE:
 ${castRosterText}
@@ -223,7 +223,7 @@ Generate the structured JSON array of ${clampedShotCount} shots now.`;
           return {
             id: `shot-${Date.now()}-${index + 1}`,
             shotNumber: index + 1,
-            duration: 5,
+            duration: 10,
             characterIds: ensuredChars,
             cameraAngle: s.cameraAngle || 'Medium selfie shot, handheld camera',
             visualPromptEn: s.visualPromptEn || '',

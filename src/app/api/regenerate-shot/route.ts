@@ -13,18 +13,18 @@ const singleShotSchema: Schema = {
     visualPromptEn: {
       type: Type.STRING,
       description:
-        'Hyper-detailed visual prompt in ENGLISH for an Image-to-Video model. MUST faithfully incorporate the exact visualDescriptor of every character present in the shot, plus realistic 5-second physical actions and facial expressions.',
+        'Hyper-detailed visual prompt in ENGLISH for an Image-to-Video model. MUST faithfully incorporate the exact visualDescriptor of every character present in the shot, plus realistic 10-second physical actions and facial expressions.',
     },
     speakerId: {
       type: Type.STRING,
       nullable: true,
       description:
-        'Exact character ID of the single character speaking in this 5-second shot, or null if silent.',
+        'Exact character ID of the single character speaking in this 10-second shot, or null if silent.',
     },
     dialogueIta: {
       type: Type.STRING,
       description:
-        'Fresh, witty, natural comedy line in ITALIAN spoken by speakerId (approx. 8-15 words to fit in 5 seconds), faithful to their personality.',
+        'Fresh, witty, natural comedy line in ITALIAN spoken by speakerId (approx. 16-30 words to fit in 10 seconds), faithful to their personality.',
     },
   },
   required: ['cameraAngle', 'visualPromptEn', 'speakerId', 'dialogueIta'],
@@ -96,10 +96,10 @@ export async function POST(req: NextRequest) {
       : '';
 
     const systemInstruction = `You are a Sitcom Screenwriter and AI Video Director.
-Your task is to REGENERATE a fresh, funnier, and more dynamic version of Shot #${shot.shotNumber} (duration: 5 seconds) for the episode "${episodeTitle || ''}".
+Your task is to REGENERATE a fresh, funnier, and more dynamic version of Shot #${shot.shotNumber} (duration: 10 seconds) for the episode "${episodeTitle || ''}".
 RULES:
-1. "visualPromptEn" MUST be in ENGLISH and MUST faithfully embed the exact "Visual Descriptor" of every character in this shot, plus a realistic 5-second action and facial expression.
-2. "dialogueIta" MUST be a brand-new, hilarious, natural line in ITALIAN (8-15 words max) matching the speaking character's personality.
+1. "visualPromptEn" MUST be in ENGLISH and MUST faithfully embed the exact "Visual Descriptor" of every character in this shot, plus a realistic 10-second action and facial expression.
+2. "dialogueIta" MUST be a brand-new, hilarious, natural line in ITALIAN (16-30 words) matching the speaking character's personality.
 3. Make sure this new version differs from the previous line ("${shot.dialogueIta}") while staying coherent with the episode plot.`;
 
     const userPrompt = `EPISODE TITLE: "${episodeTitle || ''}"

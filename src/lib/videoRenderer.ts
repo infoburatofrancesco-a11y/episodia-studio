@@ -45,6 +45,40 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 }
 
 /**
+ * Comprime un'immagine Base64 in un JPEG leggero (~35KB) prima di inviarla all'API su Vercel,
+ * dimezzando i tempi di risposta di Nano Banana ed evitando qualsiasi timeout 504!
+ */
+export async function compressImageForApi(
+  dataUrl: string,
+  maxDim = 512
+): Promise<string> {
+  if (!dataUrl || typeof window === 'undefined') return dataUrl;
+  try {
+    const img = await loadImage(dataUrl);
+    let w = img.width || 512;
+    let h = img.height || 512;
+    if (w > maxDim || h > maxDim) {
+      if (w > h) {
+        h = Math.round((h * maxDim) / w);
+        w = maxDim;
+      } else {
+        w = Math.round((w * maxDim) / h);
+        h = maxDim;
+      }
+    }
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const ctx = c.getContext('2d');
+    if (!ctx) return dataUrl;
+    ctx.drawImage(img, 0, 0, w, h);
+    return c.toDataURL('image/jpeg', 0.78);
+  } catch {
+    return dataUrl;
+  }
+}
+
+/**
  * Rimuove eventuali parametri ";codecs=vp8,opus" dal prefisso Data URL
  * perché la virgola dentro "vp8,opus" prima di ";base64," rompe il parser RFC 2397 di Chrome nei tag <video>,
  * facendo apparire il video grigio con durata 0:00!
@@ -197,7 +231,7 @@ export async function renderShotVideoDataUrl(
     dialogueIta = '',
     speakerName = '',
     shotLabel = '',
-    durationSeconds = 5,
+    durationSeconds = 10,
     aspectRatio = '9:16',
     compactForCloud = false,
     onProgress,
