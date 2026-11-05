@@ -35,6 +35,7 @@ import {
   stitchVideoClipsIntoSingleVideo,
   unlockSharedAudioContext,
   normalizeVideoDataUrl,
+  downloadVideoDataUrlAsBinaryFile,
 } from '@/lib/videoRenderer';
 
 function fixWebmDurationOnLoad(e: React.SyntheticEvent<HTMLVideoElement>) {
@@ -294,10 +295,10 @@ export default function StoryboardStudioView({
 
   const handleDownloadLocalVideo = (shot: Shot) => {
     if (!shot.videoUrl) return;
-    const a = document.createElement('a');
-    a.href = shot.videoUrl;
-    a.download = `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_Shot${shot.shotNumber}.webm`;
-    a.click();
+    downloadVideoDataUrlAsBinaryFile(
+      shot.videoUrl,
+      `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_Shot${shot.shotNumber}.webm`
+    );
   };
 
   // Genera la clip video di 5s per un singolo Shot dell'episodio e la salva SOLO in locale
@@ -468,10 +469,10 @@ export default function StoryboardStudioView({
       const finalKey = `final-ep-${activeEpisode.id}`;
       await saveLocalGeneratedVideo(finalKey, mergedFinalVideoUrl);
 
-      const a = document.createElement('a');
-      a.href = mergedFinalVideoUrl;
-      a.download = `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_COMPLETO_CON_SIGLA.webm`;
-      a.click();
+      downloadVideoDataUrlAsBinaryFile(
+        mergedFinalVideoUrl,
+        `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_COMPLETO_CON_SIGLA.webm`
+      );
     } catch (err) {
       console.error('Errore unione video finale con sigla:', err);
     } finally {
@@ -482,10 +483,10 @@ export default function StoryboardStudioView({
 
   const handleDownloadMergedPreviewVideo = () => {
     if (!mergedEpisodePreviewUrl) return;
-    const a = document.createElement('a');
-    a.href = mergedEpisodePreviewUrl;
-    a.download = `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_COMPLETO_CON_SIGLA.webm`;
-    a.click();
+    downloadVideoDataUrlAsBinaryFile(
+      mergedEpisodePreviewUrl,
+      `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_COMPLETO_CON_SIGLA.webm`
+    );
   };
 
   // Costruisce la timeline completa di esportazione con la Sigla (max 15s) in testa + gli Shot dell'episodio
@@ -527,17 +528,17 @@ export default function StoryboardStudioView({
 
     // Se sono presenti anche clip video (Sigla in testa + Shot), scarica in sequenza partendo dalla Sigla!
     if (hasActiveIntro && activeSeries.intro?.introVideoUrl) {
-      const introLink = document.createElement('a');
-      introLink.href = activeSeries.intro.introVideoUrl;
-      introLink.download = `00_SIGLA_IN_TESTA_${introDurationOffset}s_${activeSeries.title.replace(/\s+/g, '_')}.mp4`;
-      introLink.click();
+      downloadVideoDataUrlAsBinaryFile(
+        activeSeries.intro.introVideoUrl,
+        `00_SIGLA_IN_TESTA_${introDurationOffset}s_${activeSeries.title.replace(/\s+/g, '_')}.webm`
+      );
     }
     activeEpisode.shots.forEach((shot) => {
       if (shot.videoUrl) {
-        const shotLink = document.createElement('a');
-        shotLink.href = shot.videoUrl;
-        shotLink.download = `${String(shot.shotNumber).padStart(2, '0')}_Shot_${shot.shotNumber}_Ep${activeEpisode.episodeNumber}.mp4`;
-        shotLink.click();
+        downloadVideoDataUrlAsBinaryFile(
+          shot.videoUrl,
+          `${String(shot.shotNumber).padStart(2, '0')}_Shot_${shot.shotNumber}_Ep${activeEpisode.episodeNumber}.webm`
+        );
       }
     });
   };

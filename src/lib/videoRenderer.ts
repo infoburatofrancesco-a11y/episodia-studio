@@ -51,10 +51,49 @@ function loadImage(src: string): Promise<HTMLImageElement> {
  */
 export function normalizeVideoDataUrl(url?: string | null): string {
   if (!url) return '';
-  return url.replace(
-    /^data:(video\/[a-z0-9]+);[^;]+;base64,/i,
-    'data:$1;base64,'
-  );
+  const idx = url.indexOf(';base64,');
+  if (idx >= 0) {
+    const rawBase64 = url.slice(idx + 8);
+    const isMp4 = url.slice(0, idx).includes('video/mp4');
+    return `data:${isMp4 ? 'video/mp4' : 'video/webm'};base64,${rawBase64}`;
+  }
+  return url;
+}
+
+/**
+ * Converte qualsiasi Data URL video in un vero Blob binario (Uint8Array) e avvia il download del file binario reale.
+ * Impedisce che Chrome salvi testo Base64 ("opus;base64,...") dentro il file .webm/.mp4!
+ */
+export function downloadVideoDataUrlAsBinaryFile(
+  videoDataUrl: string,
+  filename: string
+): void {
+  if (!videoDataUrl) return;
+  try {
+    const idx = videoDataUrl.indexOf(';base64,');
+    const rawBase64 =
+      idx >= 0 ? videoDataUrl.slice(idx + 8).trim() : videoDataUrl.trim();
+    const binaryStr = atob(rawBase64);
+    const len = binaryStr.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    const isMp4 = videoDataUrl.slice(0, Math.max(0, idx)).includes('video/mp4');
+    const blob = new Blob([bytes], {
+      type: isMp4 ? 'video/mp4' : 'video/webm',
+    });
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+  } catch (err) {
+    console.error('Errore download binario video:', err);
+  }
 }
 
 function blobToDataUrl(blob: Blob): Promise<string> {
@@ -320,58 +359,42 @@ export async function renderShotVideoDataUrl(
         ctx.fillStyle = '#09090b';
         ctx.fillRect(0, 0, width, height);
 
-        const talkBounceY =
-          Math.sin(elapsed * 0.024) *
-          (height * 0.009 * (0.35 + voiceEnergy * 1.5));
-        const talkTiltRad =
-          Math.sin(elapsed * 0.012) * (0.014 * (0.4 + voiceEnergy));
-        const baseScale = 1.03 + progress * 0.06 + voiceEnergy * 0.028;
-        const panX = Math.sin(progress * Math.PI * 1.5) * (width * 0.02);
-        const panY = talkBounceY;
+        // Movimento di camera naturale (senza sovrapporre 2 foto al 50% di trasparenza che creava l'effetto fantasma sdoppiato!)
+        const baseScale = 1.02 + progress * 0.04;
+        const panX = Math.sin(progress * Math.PI) * (width * 0.012);
+        const panY =
+          Math.sin(elapsed * 0.018) *
+          (height * 0.004 * (0.4 + voiceEnergy * 0.8));
+        const tiltRad = Math.sin(elapsed * 0.009) * 0.005;
 
-        if (loadedFrames.length === 1) {
-          drawCoverImage(
-            ctx,
-            loadedFrames[0],
-            width,
-            height,
-            baseScale,
-            panX,
-            panY,
-            talkTiltRad,
-            1
-          );
-        } else {
-          const cycleWave = (Math.sin(elapsed * 0.0065) + 1) / 2;
-          const blendFactor =
-            voiceEnergy > 0.35
-              ? Math.min(1, cycleWave * 0.5 + 0.5)
-              : cycleWave * 0.7;
-
-          drawCoverImage(
-            ctx,
-            loadedFrames[0],
-            width,
-            height,
-            baseScale,
-            panX,
-            panY,
-            talkTiltRad,
-            1
-          );
-
-          drawCoverImage(
-            ctx,
-            loadedFrames[1 % loadedFrames.length],
-            width,
-            height,
-            baseScale * (1 + voiceEnergy * 0.012),
-            panX * 0.9,
-            panY * 1.1,
-            -talkTiltRad * 0.7,
-            blendFactor
-          );
+        // Selezione nitida del fotogramma attivo (Pose 0: neutra, Pose 1: bocca aperta e gesto mentre parla, Pose 2: reazione espressiva)
+        let activeFrameIdx = 0;
+        if (loadedFrames.length > 1) {
+          const syllableSlot = Math.floor(elapsed / 260);
+          if (voiceEnergy > 0.14) {
+            // Quando il personaggio parla, alterna in modo nitido tra le pose parlate/gestuali
+            activeFrameIdx = syllableSlot % loadedFrames.length;
+          } else {
+            // Nelle pause usa la posa base o di reazione finale
+            activeFrameIdx =
+              progress > 0.78 && loadedFrames.length > 2 ? 2 : 0;
+          }
         }
+
+        const currentFrame =
+          loadedFrames[activeFrameIdx] || loadedFrames[0];
+
+        drawCoverImage(
+          ctx,
+          currentFrame,
+          width,
+          height,
+          baseScale,
+          panX,
+          panY,
+          tiltRad,
+          1
+        );
 
         const grad = ctx.createLinearGradient(0, height * 0.58, 0, height);
         grad.addColorStop(0, 'rgba(0,0,0,0)');

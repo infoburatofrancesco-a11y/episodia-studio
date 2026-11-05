@@ -146,16 +146,60 @@ export async function POST(req: NextRequest) {
         ? 'vertical 9:16 portrait smartphone social format'
         : 'horizontal 16:9 widescreen cinematic format';
 
-    const beatPrompts = [
-      `Generate a photorealistic cinematic TV series frame in ${orientationLabel}. Keep the exact face and identity of the reference character photo(s). Scene: ${visualPromptEn}. Pose A: Character is looking at the camera, gesturing naturally with hands and speaking with mouth open. No text overlays.`,
-      `Generate a photorealistic cinematic TV series frame in ${orientationLabel} in the exact same room and lighting. Keep the exact face and identity of the reference character photo(s). Scene: ${visualPromptEn}. Pose B: Character shifts posture dynamically with an expressive comedic facial reaction and animated gesture. No text overlays.`,
-    ];
+    const masterPrompt = `Generate a photorealistic cinematic TV series frame in ${orientationLabel}. Keep the exact face and identity of the reference character photo(s). Scene: ${visualPromptEn}. Natural posture, expressive face, looking at camera. No text overlays, no watermarks.`;
 
-    const [frame1, frame2, audioWavBase64] = await Promise.all([
-      generateSingleNanoBananaFrame(ai, refParts, beatPrompts[0]),
-      generateSingleNanoBananaFrame(ai, refParts, beatPrompts[1]),
+    // Eseguiamo in parallelo:
+    // A) La sequenza coerente Nano Banana (Frame 1 Master -> Frame 2 Parlato & Gesto + Frame 3 Reazione derivati dallo STESSO Frame 1 per bloccare lo sfondo!)
+    // B) La sintesi vocale TTS della SOLA battuta del personaggio (senza istruzioni testuali lette ad alta voce!)
+    const [framesBase64, audioWavBase64] = await Promise.all([
+      (async (): Promise<string[]> => {
+        const frame1 = await generateSingleNanoBananaFrame(
+          ai,
+          refParts,
+          masterPrompt
+        );
+        if (!frame1) {
+          return referenceImagesBase64.slice(0, 2);
+        }
+
+        const parsedFrame1 = parseDataUrl(frame1);
+        if (!parsedFrame1) {
+          return [frame1];
+        }
+
+        const frame1Part = [
+          {
+            inlineData: {
+              mimeType: parsedFrame1.mimeType,
+              data: parsedFrame1.data,
+            },
+          },
+        ];
+
+        const [frame2, frame3] = await Promise.all([
+          generateSingleNanoBananaFrame(
+            ai,
+            frame1Part,
+            `Edit this exact image in ${orientationLabel}: keep the EXACT same background, room, lighting, camera position, and background characters 100% identical. ONLY animate the main foreground character speaking: mouth open mid-speech, expressive eyebrows, and active hand gesture. No text overlays.`
+          ),
+          generateSingleNanoBananaFrame(
+            ai,
+            frame1Part,
+            `Edit this exact image in ${orientationLabel}: keep the EXACT same background, room, lighting, camera position, and background characters 100% identical. ONLY animate the main foreground character reacting: expressive smile or comedic expression, slight head tilt, and shifted hand position. No text overlays.`
+          ),
+        ]);
+
+        return [frame1, frame2, frame3].filter((f): f is string => Boolean(f));
+      })(),
       (async (): Promise<string | null> => {
         if (!dialogueIta || !dialogueIta.trim()) return null;
+        // Puliamo eventuali virgolette esterne così il TTS legge ESCLUSIVAMENTE la battuta del personaggio!
+        const cleanDialogue = dialogueIta
+          .trim()
+          .replace(/^["“«]+|["”»]+$/g, '')
+          .trim();
+        if (!cleanDialogue) return null;
+
         const voiceName = pickVoiceForSpeaker(speakerName);
         const ttsModels = [
           'gemini-3.8-flash-tts',
@@ -171,7 +215,7 @@ export async function POST(req: NextRequest) {
                   role: 'user',
                   parts: [
                     {
-                      text: `Recita in italiano in modo espressivo, brillante e naturale questa battuta (massimo 5 secondi): "${dialogueIta.trim()}"`,
+                      text: cleanDialogue,
                     },
                   ],
                 },
@@ -206,14 +250,6 @@ export async function POST(req: NextRequest) {
         return null;
       })(),
     ]);
-
-    const framesBase64 = [frame1, frame2].filter((f): f is string =>
-      Boolean(f)
-    );
-
-    if (framesBase64.length === 0 && referenceImagesBase64.length > 0) {
-      framesBase64.push(...referenceImagesBase64.slice(0, 2));
-    }
 
     return NextResponse.json({
       frameImageBase64: framesBase64[0] || null,
