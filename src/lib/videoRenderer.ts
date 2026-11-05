@@ -356,15 +356,15 @@ export async function renderShotVideoDataUrl(
     const audioCtx = unlockSharedAudioContext();
     let dest: MediaStreamAudioDestinationNode | null = null;
     let analyser: AnalyserNode | null = null;
-    let freqData: Uint8Array | null = null;
+    let timeData: Uint8Array | null = null;
     let audioBuffer: AudioBuffer | null = null;
 
     if (audioCtx && audioCtx.state === 'running') {
       try {
         dest = audioCtx.createMediaStreamDestination();
         analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 128;
-        freqData = new Uint8Array(analyser.frequencyBinCount);
+        analyser.fftSize = 256;
+        timeData = new Uint8Array(analyser.fftSize);
 
         if (audioWavBase64) {
           const res = await fetch(audioWavBase64);
@@ -429,6 +429,13 @@ export async function renderShotVideoDataUrl(
 
     const startTime = performance.now();
     const totalMs = durationSeconds * 1000;
+    const audioDurationMs = audioBuffer
+      ? audioBuffer.duration * 1000
+      : totalMs * 0.85;
+
+    let currentPoseIdx = 0;
+    let lastPoseSwitchMs = 0;
+    let syllableCounter = 0;
 
     await new Promise<void>((resolve) => {
       const timer = setInterval(() => {
@@ -438,60 +445,80 @@ export async function renderShotVideoDataUrl(
           onProgress(Math.min(99, Math.round(progress * 100)));
         }
 
-        let voiceEnergy = 0.35 + 0.25 * Math.abs(Math.sin(elapsed * 0.015));
-        if (analyser && freqData) {
+        const isWithinSpeechWindow = elapsed <= audioDurationMs + 150;
+        let rmsEnergy = isWithinSpeechWindow
+          ? 0.04 + 0.04 * Math.abs(Math.sin(elapsed * 0.018))
+          : 0;
+
+        if (analyser && timeData && isWithinSpeechWindow) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          analyser.getByteFrequencyData(freqData as any);
-          let sum = 0;
-          for (let i = 0; i < 24; i++) {
-            sum += freqData[i];
+          analyser.getByteTimeDomainData(timeData as any);
+          let sumSq = 0;
+          for (let i = 0; i < timeData.length; i++) {
+            const norm = (timeData[i] - 128) / 128;
+            sumSq += norm * norm;
           }
-          const measured = Math.min(1, sum / (24 * 150));
-          if (measured > 0.02) {
-            voiceEnergy = measured;
+          const measuredRms = Math.sqrt(sumSq / timeData.length);
+          if (measuredRms > 0.004 || audioBuffer) {
+            rmsEnergy = measuredRms;
           }
+        } else if (!isWithinSpeechWindow) {
+          rmsEnergy = 0;
         }
+
+        const voiceEnergy = Math.min(1, rmsEnergy * 6.5);
 
         ctx.fillStyle = '#09090b';
         ctx.fillRect(0, 0, width, height);
 
-        // Regia Multi-Camera Fluida sui 10 secondi (3 stacchi cinematografici nitidi: 0-3.4s, 3.4-6.8s, 6.8-10s)
-        // Nessuna sovrapposizione al 50% (zero effetto fantasma) e nessun lampeggio rapido!
-        const numFrames = loadedFrames.length;
-        const rawSegment = progress * numFrames;
-        const activeFrameIdx = Math.min(
-          numFrames - 1,
-          Math.floor(rawSegment)
-        );
-        const segmentProgress = rawSegment - activeFrameIdx;
+        // MACCHINA A STATI LIP-SYNC & GESTI IN TEMPO REALE (100% opacità nitida, zero effetto fantasma!)
+        // Frame 0 = Bocca chiusa / posa neutra (usata sempre nelle pause e a fine battuta)
+        // Frame 1 = Bocca aperta (vocale) + gesto attivo della mano
+        // Frame 2 = Bocca semi-aperta (consonante/sorriso parlato) + inclinazione testa
+        if (loadedFrames.length > 1) {
+          if (!isWithinSpeechWindow || rmsEnergy < 0.016) {
+            // Quando il personaggio fa una pausa o ha finito di parlare, chiude subito la bocca (Frame 0)!
+            if (currentPoseIdx !== 0 && elapsed - lastPoseSwitchMs >= 140) {
+              currentPoseIdx = 0;
+              lastPoseSwitchMs = elapsed;
+            }
+          } else if (elapsed - lastPoseSwitchMs >= 230) {
+            syllableCounter++;
+            if (loadedFrames.length >= 3) {
+              if (syllableCounter % 5 === 0) {
+                // Breve chiusura labiale naturale tra le parole
+                currentPoseIdx = 0;
+              } else if (rmsEnergy >= 0.05) {
+                // Sillaba forte -> Bocca aperta + gesto A (Frame 1)
+                currentPoseIdx = currentPoseIdx === 1 ? 2 : 1;
+              } else {
+                // Sillaba media -> Bocca semi-aperta + gesto B (Frame 2)
+                currentPoseIdx = currentPoseIdx === 2 ? 1 : 2;
+              }
+            } else {
+              // Se ci sono 2 pose (chiusa e aperta), alterna a ritmo delle sillabe della voce
+              currentPoseIdx = currentPoseIdx === 0 ? 1 : 0;
+            }
+            lastPoseSwitchMs = elapsed;
+          }
+        } else {
+          currentPoseIdx = 0;
+        }
 
-        // Piccola spinta dinamica di zoom (whip-zoom) nei primi 120ms del cambio inquadratura
-        const cutZoomBoost =
-          activeFrameIdx > 0 && segmentProgress < 0.08
-            ? (1 - segmentProgress / 0.08) * 0.035
-            : 0;
-
-        // Movimento di camera 24fps continuo + micro-movimento naturale sincronizzato alla voce
-        const zoomDirection = activeFrameIdx % 2 === 0 ? 1 : -1;
+        // Movimento naturale handheld 24fps + oscillazione del parlato sincronizzata all'energia vocale
         const baseScale =
-          (zoomDirection > 0
-            ? 1.02 + segmentProgress * 0.055
-            : 1.075 - segmentProgress * 0.055) +
-          cutZoomBoost +
-          voiceEnergy * 0.008;
-
-        const panDir = activeFrameIdx % 2 === 0 ? 1 : -1;
-        const panX =
-          panDir *
-          Math.sin(segmentProgress * Math.PI) *
-          (width * 0.015);
+          1.025 +
+          Math.sin(progress * Math.PI) * 0.03 +
+          voiceEnergy * 0.012;
+        const panX = Math.sin(elapsed * 0.0022) * (width * 0.01);
         const panY =
-          Math.sin(elapsed * 0.014) *
-          (height * 0.004 * (0.3 + voiceEnergy * 0.7));
-        const tiltRad = Math.sin(elapsed * 0.007) * 0.004;
+          Math.sin(elapsed * 0.019) *
+          (height * 0.0045 * (0.2 + voiceEnergy * 0.9));
+        const tiltRad =
+          Math.sin(elapsed * 0.008) * (0.002 + voiceEnergy * 0.004);
 
         const currentFrame =
-          loadedFrames[activeFrameIdx] || loadedFrames[0];
+          loadedFrames[currentPoseIdx] || loadedFrames[0];
 
         drawCoverImage(
           ctx,

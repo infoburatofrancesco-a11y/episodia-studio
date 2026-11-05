@@ -323,27 +323,47 @@ export default function StoryboardStudioView({
         .map((id) => castMap.get(id))
         .filter((c): c is Character => Boolean(c));
       const effectiveChars = shotChars.length > 0 ? shotChars : cast;
-      const rawRefPhoto =
-        effectiveChars[0]?.referenceImagesBase64?.[0] ||
-        effectiveChars[0]?.referenceImageBase64 ||
-        cast[0]?.referenceImageBase64;
 
-      const compressedRef = rawRefPhoto
-        ? await compressImageForApi(rawRefPhoto, 512)
-        : undefined;
+      // Mettiamo SEMPRE il personaggio che parla per primo così Nano Banana blocca la sua identità 1:1
+      const orderedChars = speaker
+        ? [speaker, ...effectiveChars.filter((c) => c.id !== speaker.id)]
+        : effectiveChars;
 
-      // CHIAMATA 1 (Veloce < 8s): Scena Base + Voce Italiana in parallelo
+      const rawRefList: string[] = [];
+      for (const c of orderedChars.slice(0, 3)) {
+        const primaryPhoto =
+          c.referenceImagesBase64?.[0] || c.referenceImageBase64;
+        if (primaryPhoto) rawRefList.push(primaryPhoto);
+        // Aggiungiamo anche una seconda angolazione del personaggio principale se disponibile
+        if (
+          c.id === speaker?.id &&
+          c.referenceImagesBase64 &&
+          c.referenceImagesBase64.length > 1
+        ) {
+          rawRefList.push(c.referenceImagesBase64[1]);
+        }
+      }
+
+      const compressedRefs = await Promise.all(
+        rawRefList.slice(0, 3).map((img) => compressImageForApi(img, 768))
+      );
+      const rawRefPhoto = rawRefList[0] || cast[0]?.referenceImageBase64;
+
+      // CHIAMATA 1 (Veloce < 8s): Scena Base (Fedeltà 1:1 alle foto originali) + Voce Italiana Madrelingua
       const mediaRes = await fetch('/api/generate-shot-media', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           step: 'base',
           visualPromptEn: shot.visualPromptEn,
+          cameraAngle: shot.cameraAngle,
           dialogueIta: shot.dialogueIta,
           speakerName: speaker?.name,
+          speakerDescriptor: speaker?.visualDescriptor,
           speakerCategory: speaker?.category || 'human',
+          characterNames: orderedChars.map((c) => c.name),
           aspectRatio,
-          referenceImagesBase64: compressedRef ? [compressedRef] : [],
+          referenceImagesBase64: compressedRefs,
           shotNumber: shot.shotNumber,
         }),
       });
@@ -378,31 +398,53 @@ export default function StoryboardStudioView({
 
       const framesList: string[] = [frame1];
 
-      // CHIAMATA 2 (Separata e veloce < 7s): Posa Parlata in movimento dallo stesso Frame 1
+      // CHIAMATA 2 (In parallelo < 7s): Genera 2 pose parlate (bocca aperta + gesto / bocca semi-aperta + espressione)
       try {
         setShotProgressText(
-          'Passo 2/3: Nano Banana sta animando la posa parlata del personaggio...'
+          'Passo 2/3: Nano Banana sta animando labiale, espressione e gesti del personaggio...'
         );
-        const compressedFrame1 = await compressImageForApi(frame1, 512);
-        const variantRes = await fetch('/api/generate-shot-media', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            step: 'variant',
-            baseFrameBase64: compressedFrame1,
-            variantType: 'speaking',
-            visualPromptEn: shot.visualPromptEn,
-            aspectRatio,
-          }),
-        });
-        if (variantRes.ok) {
-          const variantJson = await variantRes.json();
-          if (variantJson.frameImageBase64) {
-            framesList.push(variantJson.frameImageBase64);
+        const compressedFrame1 = await compressImageForApi(frame1, 768);
+        const [varResOpen, varResGesture] = await Promise.all([
+          fetch('/api/generate-shot-media', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              step: 'variant',
+              baseFrameBase64: compressedFrame1,
+              variantType: 'speaking_open',
+              speakerName: speaker?.name,
+              visualPromptEn: shot.visualPromptEn,
+              aspectRatio,
+            }),
+          }).catch(() => null),
+          fetch('/api/generate-shot-media', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              step: 'variant',
+              baseFrameBase64: compressedFrame1,
+              variantType: 'speaking_gesture',
+              speakerName: speaker?.name,
+              visualPromptEn: shot.visualPromptEn,
+              aspectRatio,
+            }),
+          }).catch(() => null),
+        ]);
+
+        if (varResOpen && varResOpen.ok) {
+          const jsonOpen = await varResOpen.json();
+          if (jsonOpen.frameImageBase64) {
+            framesList.push(jsonOpen.frameImageBase64);
+          }
+        }
+        if (varResGesture && varResGesture.ok) {
+          const jsonGesture = await varResGesture.json();
+          if (jsonGesture.frameImageBase64) {
+            framesList.push(jsonGesture.frameImageBase64);
           }
         }
       } catch {
-        // Se la seconda chiamata opzionale rallenta, proseguiamo subito con il Frame 1 + Voce!
+        // Fallback sicuro
       }
 
       setShotProgressText('Passo 3/3: Registrazione Video 10s (0%)...');
