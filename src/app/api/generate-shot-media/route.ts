@@ -11,7 +11,9 @@ interface GenerateShotMediaBody {
   shotNumber?: number;
 }
 
-function parseDataUrl(dataUrl: string): { mimeType: string; data: string } | null {
+function parseDataUrl(
+  dataUrl: string
+): { mimeType: string; data: string } | null {
   const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
   if (match) {
     return { mimeType: match[1], data: match[2] };
@@ -33,8 +35,8 @@ function pcm24kMonoToWavBase64(pcmBase64: string, sampleRate = 24000): string {
   wavHeader.writeUInt32LE(36 + dataSize, 4);
   wavHeader.write('WAVE', 8);
   wavHeader.write('fmt ', 12);
-  wavHeader.writeUInt32LE(16, 16); // Subchunk1Size (PCM)
-  wavHeader.writeUInt16LE(1, 20); // AudioFormat (1 = PCM)
+  wavHeader.writeUInt32LE(16, 16);
+  wavHeader.writeUInt16LE(1, 20);
   wavHeader.writeUInt16LE(numChannels, 22);
   wavHeader.writeUInt32LE(sampleRate, 24);
   wavHeader.writeUInt32LE(byteRate, 28);
@@ -58,6 +60,49 @@ function pickVoiceForSpeaker(speakerName?: string): string {
   return VOICE_POOL[hash % VOICE_POOL.length];
 }
 
+async function generateSingleNanoBananaFrame(
+  ai: GoogleGenAI,
+  refParts: Array<{ inlineData: { mimeType: string; data: string } }>,
+  promptText: string
+): Promise<string | null> {
+  const nanoBananaModels = [
+    'gemini-nano-banana-2.1',
+    'nano-banana-pro-preview',
+    'gemini-3.1-flash-image',
+    'gemini-2.5-flash-image',
+  ];
+
+  for (const modelName of nanoBananaModels) {
+    try {
+      const res = await ai.models.generateContent({
+        model: modelName,
+        contents: [
+          {
+            role: 'user',
+            parts: [...refParts, { text: promptText }],
+          },
+        ],
+        config: {
+          responseModalities: ['IMAGE', 'TEXT'],
+        },
+      });
+
+      const parts = res.candidates?.[0]?.content?.parts || [];
+      for (const p of parts) {
+        if (
+          p.inlineData?.data &&
+          p.inlineData?.mimeType?.startsWith('image/')
+        ) {
+          return `data:${p.inlineData.mimeType};base64,${p.inlineData.data}`;
+        }
+      }
+    } catch (err) {
+      console.warn(`Fallback Nano Banana model (${modelName}):`, err);
+    }
+  }
+  return null;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -79,17 +124,12 @@ export async function POST(req: NextRequest) {
 
     const ai = new GoogleGenAI({ apiKey });
 
-    // 1. GENERAZIONE IMMAGINE SCENA COERENTE COL CAST (Gemini 3.1 Flash Image / 2.5 Flash Image)
-    let frameImageBase64: string | null = null;
-    const imageParts: Array<
-      | { inlineData: { mimeType: string; data: string } }
-      | { text: string }
-    > = [];
-
+    const refParts: Array<{ inlineData: { mimeType: string; data: string } }> =
+      [];
     for (const refImg of referenceImagesBase64.slice(0, 4)) {
       const parsed = parseDataUrl(refImg);
       if (parsed) {
-        imageParts.push({
+        refParts.push({
           inlineData: {
             mimeType: parsed.mimeType,
             data: parsed.data,
@@ -103,111 +143,92 @@ export async function POST(req: NextRequest) {
         ? 'vertical 9:16 portrait smartphone social format'
         : 'horizontal 16:9 widescreen cinematic format';
 
-    imageParts.push({
-      text: `Generate a photorealistic cinematic TV series scene frame in ${orientationLabel}. Keep the exact facial features, hair, and identity of the reference character photo(s) provided. Scene description: ${visualPromptEn}. High quality lighting, expressive acting, no text overlays.`,
-    });
-
-    const imageModels = [
-      'gemini-3.1-flash-image',
-      'gemini-2.5-flash-image',
-      'gemini-3-pro-image',
+    // Generiamo con NANO BANANA 3 fotogrammi d'azione sequenziali (Pose 1 -> Pose 2 -> Pose 3)
+    // in modo che il personaggio si muova, gesticoli, cambi espressione e parli nella scena!
+    const beatPrompts = [
+      `[NANO BANANA MOTION FRAME 1 of 3 - START OF ACTION] Generate a photorealistic cinematic TV series frame in ${orientationLabel}. Preserve the exact identity, face, and clothes of the reference character photo(s). Scene: ${visualPromptEn}. Pose 1: Character begins the physical movement, looking towards camera, mouth slightly open starting to speak expressively. No text overlays.`,
+      `[NANO BANANA MOTION FRAME 2 of 3 - PEAK GESTURE & SPEAKING] Generate a photorealistic cinematic TV series frame in ${orientationLabel} in the EXACT SAME environment and lighting. Preserve the exact identity of the reference character photo(s). Scene: ${visualPromptEn}. Pose 2: Character is mid-action with dynamic hand/body movement, head tilted, animated facial expression and open mouth actively speaking Italian dialogue. No text overlays.`,
+      `[NANO BANANA MOTION FRAME 3 of 3 - EXPRESSIVE REACTION / FINISH] Generate a photorealistic cinematic TV series frame in ${orientationLabel} in the EXACT SAME environment and lighting. Preserve the exact identity of the reference character photo(s). Scene: ${visualPromptEn}. Pose 3: Character completes the gesture with a strong comedic/expressive facial reaction, dynamic posture shift. No text overlays.`,
     ];
 
-    for (const modelName of imageModels) {
-      try {
-        const imgRes = await ai.models.generateContent({
-          model: modelName,
-          contents: [{ role: 'user', parts: imageParts }],
-          config: {
-            responseModalities: ['IMAGE', 'TEXT'],
-          },
-        });
-
-        const parts = imgRes.candidates?.[0]?.content?.parts || [];
-        for (const p of parts) {
-          if (p.inlineData?.data && p.inlineData?.mimeType?.startsWith('image/')) {
-            frameImageBase64 = `data:${p.inlineData.mimeType};base64,${p.inlineData.data}`;
-            break;
-          }
-        }
-        if (frameImageBase64) break;
-      } catch (imgErr) {
-        console.warn(`Fallback modello immagine (${modelName}):`, imgErr);
-      }
-    }
-
-    // Se il modello immagine non restituisce un frame, usiamo la prima foto di riferimento del personaggio
-    if (!frameImageBase64 && referenceImagesBase64.length > 0) {
-      frameImageBase64 = referenceImagesBase64[0];
-    }
-
-    // 2. GENERAZIONE VOCE ITALIANA RECITATA (Gemini 3.8 Flash TTS / 2.5 Flash Preview TTS)
-    let audioWavBase64: string | null = null;
-    if (dialogueIta && dialogueIta.trim().length > 0) {
-      const voiceName = pickVoiceForSpeaker(speakerName);
-      const ttsModels = [
-        'gemini-3.8-flash-tts',
-        'gemini-2.5-flash-preview-tts',
-        'gemini-3.8-flash-lite-tts',
-      ];
-
-      for (const ttsModel of ttsModels) {
-        try {
-          const ttsRes = await ai.models.generateContent({
-            model: ttsModel,
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  {
-                    text: `Recita in italiano in modo espressivo, brillante e naturale questa battuta (massimo 5 secondi): "${dialogueIta.trim()}"`,
-                  },
-                ],
-              },
-            ],
-            config: {
-              responseModalities: ['AUDIO'],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: {
-                    voiceName,
+    // Eseguiamo in parallelo i 3 frame d'azione Nano Banana + la sintesi vocale italiana TTS
+    const [frame1, frame2, frame3, audioWavBase64] = await Promise.all([
+      generateSingleNanoBananaFrame(ai, refParts, beatPrompts[0]),
+      generateSingleNanoBananaFrame(ai, refParts, beatPrompts[1]),
+      generateSingleNanoBananaFrame(ai, refParts, beatPrompts[2]),
+      (async (): Promise<string | null> => {
+        if (!dialogueIta || !dialogueIta.trim()) return null;
+        const voiceName = pickVoiceForSpeaker(speakerName);
+        const ttsModels = [
+          'gemini-3.8-flash-tts',
+          'gemini-2.5-flash-preview-tts',
+          'gemini-3.8-flash-lite-tts',
+        ];
+        for (const ttsModel of ttsModels) {
+          try {
+            const ttsRes = await ai.models.generateContent({
+              model: ttsModel,
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    {
+                      text: `Recita in italiano in modo espressivo, brillante e naturale questa battuta (massimo 5 secondi): "${dialogueIta.trim()}"`,
+                    },
+                  ],
+                },
+              ],
+              config: {
+                responseModalities: ['AUDIO'],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: {
+                      voiceName,
+                    },
                   },
                 },
               },
-            },
-          });
+            });
 
-          const audioPart = ttsRes.candidates?.[0]?.content?.parts?.find(
-            (p) => p.inlineData?.data
-          );
-          if (audioPart?.inlineData?.data) {
-            const mime = audioPart.inlineData.mimeType || 'audio/L16;rate=24000';
-            if (mime.includes('wav')) {
-              audioWavBase64 = `data:audio/wav;base64,${audioPart.inlineData.data}`;
-            } else {
-              audioWavBase64 = pcm24kMonoToWavBase64(
-                audioPart.inlineData.data,
-                24000
-              );
+            const audioPart = ttsRes.candidates?.[0]?.content?.parts?.find(
+              (p) => p.inlineData?.data
+            );
+            if (audioPart?.inlineData?.data) {
+              const mime =
+                audioPart.inlineData.mimeType || 'audio/L16;rate=24000';
+              if (mime.includes('wav')) {
+                return `data:audio/wav;base64,${audioPart.inlineData.data}`;
+              }
+              return pcm24kMonoToWavBase64(audioPart.inlineData.data, 24000);
             }
-            break;
+          } catch (ttsErr) {
+            console.warn(`Fallback modello TTS (${ttsModel}):`, ttsErr);
           }
-        } catch (ttsErr) {
-          console.warn(`Fallback modello TTS (${ttsModel}):`, ttsErr);
         }
-      }
+        return null;
+      })(),
+    ]);
+
+    const framesBase64 = [frame1, frame2, frame3].filter(
+      (f): f is string => Boolean(f)
+    );
+
+    if (framesBase64.length === 0 && referenceImagesBase64.length > 0) {
+      framesBase64.push(...referenceImagesBase64.slice(0, 3));
     }
 
     return NextResponse.json({
-      frameImageBase64,
+      frameImageBase64: framesBase64[0] || null,
+      framesBase64,
       audioWavBase64,
+      modelUsed: 'gemini-nano-banana-2.1',
     });
   } catch (error: unknown) {
     console.error('Errore in /api/generate-shot-media:', error);
     const msg =
       error instanceof Error
         ? error.message
-        : 'Errore imprevisto durante la generazione multimediale dello shot.';
+        : 'Errore imprevisto durante la generazione Nano Banana dello shot.';
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

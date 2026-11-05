@@ -89,6 +89,9 @@ export default function StoryboardStudioView({
   >(null);
   const [isStitchingFinalVideo, setIsStitchingFinalVideo] = useState(false);
   const [stitchStatus, setStitchStatus] = useState<string | null>(null);
+  const [mergedEpisodePreviewUrl, setMergedEpisodePreviewUrl] = useState<
+    string | null
+  >(null);
   const [isRegeneratingWholeEpisode, setIsRegeneratingWholeEpisode] =
     useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
@@ -329,6 +332,9 @@ export default function StoryboardStudioView({
 
       const clipDataUrl = await renderShotVideoDataUrl({
         frameImageBase64: frameImg,
+        framesBase64: Array.isArray(mediaData.framesBase64)
+          ? mediaData.framesBase64
+          : undefined,
         audioWavBase64: mediaData.audioWavBase64,
         dialogueIta: shot.dialogueIta,
         speakerName: speaker?.name,
@@ -354,9 +360,11 @@ export default function StoryboardStudioView({
     }
   };
 
-  // Genera eventuali shot mancanti, UNISCE in testa il Video Sigla dal Database Cloud (0s-15s)
-  // e scarica l'UNICO file video finale completo SOLO in locale!
-  const handleRenderAndMergeCompleteLocalVideo = async () => {
+  // Genera eventuali shot mancanti con Nano Banana, UNISCE in testa il Video Sigla dal Database Cloud (0s-15s)
+  // e mostra subito l'ANTEPRIMA VIDEO COMPLETA NELL'APP (con possibilità di scaricarla alla fine)!
+  const handleRenderAndMergeCompleteLocalVideo = async (
+    downloadImmediately = false
+  ) => {
     setIsStitchingFinalVideo(true);
     try {
       const clipsToMerge: string[] = [];
@@ -374,14 +382,14 @@ export default function StoryboardStudioView({
         });
       }
 
-      // 2. Per ogni Shot della puntata, usa la clip locale già pronta o generala al volo
+      // 2. Per ogni Shot della puntata, usa la clip locale già pronta o generala con Nano Banana
       const updatedShots = [...activeEpisode.shots];
       for (let i = 0; i < updatedShots.length; i++) {
         const s = updatedShots[i];
         let clipUrl: string | undefined | null = s.videoUrl;
         if (!clipUrl) {
           setStitchStatus(
-            `Generazione AI Shot #${s.shotNumber}/${updatedShots.length} (5s)...`
+            `Nano Banana AI: Generazione pose movimento + voce Shot #${s.shotNumber}/${updatedShots.length} (5s)...`
           );
           clipUrl = await handleGenerateShotVideoLocal(s);
           if (clipUrl) {
@@ -409,8 +417,8 @@ export default function StoryboardStudioView({
 
       setStitchStatus(
         hasActiveIntro && activeSeries.intro?.introVideoUrl
-          ? `Unione Sigla Cloud (${introDurationOffset}s in testa) + Puntata in un unico file video locale...`
-          : 'Unione Shot in un unico file video locale...'
+          ? `Montaggio anteprima: Sigla Cloud (${introDurationOffset}s in testa) + Puntata...`
+          : 'Montaggio anteprima video completa...'
       );
 
       const mergedFinalVideoUrl = await stitchVideoClipsIntoSingleVideo(
@@ -421,17 +429,28 @@ export default function StoryboardStudioView({
 
       const finalKey = `final-ep-${activeEpisode.id}`;
       await saveLocalGeneratedVideo(finalKey, mergedFinalVideoUrl);
+      setMergedEpisodePreviewUrl(mergedFinalVideoUrl);
 
-      const a = document.createElement('a');
-      a.href = mergedFinalVideoUrl;
-      a.download = `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_COMPLETO_CON_SIGLA.webm`;
-      a.click();
+      if (downloadImmediately) {
+        const a = document.createElement('a');
+        a.href = mergedFinalVideoUrl;
+        a.download = `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_COMPLETO_CON_SIGLA.webm`;
+        a.click();
+      }
     } catch (err) {
       console.error('Errore unione video finale con sigla:', err);
     } finally {
       setIsStitchingFinalVideo(false);
       setStitchStatus(null);
     }
+  };
+
+  const handleDownloadMergedPreviewVideo = () => {
+    if (!mergedEpisodePreviewUrl) return;
+    const a = document.createElement('a');
+    a.href = mergedEpisodePreviewUrl;
+    a.download = `${activeSeries.title.replace(/\s+/g, '_')}_Ep${activeEpisode.episodeNumber}_COMPLETO_CON_SIGLA.webm`;
+    a.click();
   };
 
   // Costruisce la timeline completa di esportazione con la Sigla (max 15s) in testa + gli Shot dell'episodio
@@ -594,6 +613,26 @@ export default function StoryboardStudioView({
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
+            {/* PULSANTE GENERA TUTTI GLI SHOT CON NANO BANANA & MOSTRA ANTEPRIMA */}
+            <button
+              type="button"
+              disabled={isStitchingFinalVideo}
+              onClick={() => handleRenderAndMergeCompleteLocalVideo(false)}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-zinc-950 text-xs font-black shadow-lg transition disabled:opacity-50"
+            >
+              {isStitchingFinalVideo ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  {stitchStatus || 'Generazione Nano Banana in corso...'}
+                </>
+              ) : (
+                <>
+                  <Play className="w-4 h-4 fill-current" />
+                  Genera Video (Nano Banana) &amp; Vedi Anteprima in App
+                </>
+              )}
+            </button>
+
             {/* PULSANTE ESPORTA VIDEO / PUNTATA CON SIGLA IN TESTA */}
             <button
               type="button"
@@ -605,8 +644,8 @@ export default function StoryboardStudioView({
             >
               <FileVideo className="w-4 h-4" />
               {hasActiveIntro
-                ? `Esporta Video (con Sigla ${introDurationOffset}s in Testa)`
-                : 'Esporta Puntata'}
+                ? `Anteprima & Scarica (con Sigla ${introDurationOffset}s)`
+                : 'Anteprima & Scarica Puntata'}
             </button>
 
             {/* PULSANTE RIGENERA INTERO EPISODIO */}
@@ -800,23 +839,35 @@ export default function StoryboardStudioView({
               ))}
             </div>
 
-            {/* PLAYER SEQUENZIALE SE CI SONO CLIP VIDEO CARICATE */}
-            {playableClips.length > 0 && (
-              <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-2 text-center">
+            {/* PLAYER ANTEPRIMA IN APP (O VIDEO UNICO UNITO O SEQUENZA CLIP) */}
+            {(mergedEpisodePreviewUrl || playableClips.length > 0) && (
+              <div className="p-4 rounded-xl bg-zinc-950 border border-emerald-500/40 space-y-2 text-center">
                 <span className="text-xs font-bold text-emerald-400 block">
-                  Anteprima Riproduzione Continua ({playableClips[currentPlaylistIdx]?.label})
+                  {mergedEpisodePreviewUrl
+                    ? `Anteprima Video Finale Unito (${totalEpisodeDurationWithIntro}s con Sigla in Testa)`
+                    : `Anteprima Riproduzione in App (${playableClips[currentPlaylistIdx]?.label})`}
                 </span>
                 <video
-                  key={playableClips[currentPlaylistIdx]?.videoUrl}
-                  src={playableClips[currentPlaylistIdx]?.videoUrl}
+                  key={
+                    mergedEpisodePreviewUrl ||
+                    playableClips[currentPlaylistIdx]?.videoUrl
+                  }
+                  src={
+                    mergedEpisodePreviewUrl ||
+                    playableClips[currentPlaylistIdx]?.videoUrl
+                  }
                   controls
                   autoPlay
+                  playsInline
                   onEnded={() => {
-                    if (currentPlaylistIdx < playableClips.length - 1) {
+                    if (
+                      !mergedEpisodePreviewUrl &&
+                      currentPlaylistIdx < playableClips.length - 1
+                    ) {
                       setCurrentPlaylistIdx(currentPlaylistIdx + 1);
                     }
                   }}
-                  className="w-full max-h-60 rounded-lg bg-black mx-auto"
+                  className="w-full max-h-64 rounded-lg bg-black mx-auto"
                 />
               </div>
             )}
@@ -825,22 +876,36 @@ export default function StoryboardStudioView({
               <button
                 type="button"
                 disabled={isStitchingFinalVideo}
-                onClick={handleRenderAndMergeCompleteLocalVideo}
-                className="w-full py-3.5 px-5 rounded-xl bg-gradient-to-r from-emerald-500 to-amber-500 hover:from-emerald-400 hover:to-amber-400 text-zinc-950 font-black text-xs uppercase tracking-wider shadow-lg flex items-center justify-center gap-2 transition disabled:opacity-50"
+                onClick={() => handleRenderAndMergeCompleteLocalVideo(false)}
+                className="w-full py-3.5 px-5 rounded-xl bg-gradient-to-r from-violet-600 to-amber-500 hover:from-violet-500 hover:to-amber-400 text-zinc-950 font-black text-xs uppercase tracking-wider shadow-lg flex items-center justify-center gap-2 transition disabled:opacity-50"
               >
                 {isStitchingFinalVideo ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    {stitchStatus || 'Generazione e Unione Video con Sigla in corso...'}
+                    {stitchStatus || 'Generazione Nano Banana e Montaggio Anteprima...'}
                   </>
                 ) : (
                   <>
-                    <Film className="w-4 h-4" />
+                    <Play className="w-4 h-4 fill-current" />
                     {hasActiveIntro
-                      ? `Genera & Unisci in Unico Video Locale (Sigla Cloud ${introDurationOffset}s + Puntata)`
-                      : 'Genera & Scarica Video Unico della Puntata in Locale'}
+                      ? `1. Genera con Nano Banana & Vedi Anteprima Completa (Sigla ${introDurationOffset}s + Puntata)`
+                      : '1. Genera con Nano Banana & Vedi Anteprima Completa in App'}
                   </>
                 )}
+              </button>
+
+              <button
+                type="button"
+                disabled={isStitchingFinalVideo}
+                onClick={() =>
+                  mergedEpisodePreviewUrl
+                    ? handleDownloadMergedPreviewVideo()
+                    : handleRenderAndMergeCompleteLocalVideo(true)
+                }
+                className="w-full py-3.5 px-5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-zinc-950 font-black text-xs uppercase tracking-wider shadow-lg flex items-center justify-center gap-2 transition disabled:opacity-50"
+              >
+                <Download className="w-4 h-4" />
+                2. Scarica Video Finale Completo in Locale (.WebM / .MP4)
               </button>
 
               <button
@@ -852,6 +917,94 @@ export default function StoryboardStudioView({
                 Scarica Timeline JSON + Singole Clip Separate
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* TEATRO ANTEPRIMA VIDEO IN APP (SEMPRE VISIBILE APPENA GENERI UNO O PIÙ SHOT) */}
+      {(mergedEpisodePreviewUrl || playableClips.length > 0) && (
+        <div className="bg-zinc-900/95 border-2 border-emerald-500/50 rounded-2xl p-6 shadow-2xl space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-zinc-800">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
+                <Play className="w-5 h-5 fill-current" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-base font-bold text-white">
+                    Anteprima Video in App — {activeSeries.title} (Ep. #{activeEpisode.episodeNumber})
+                  </h3>
+                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                    Nano Banana Motion + Voce AI
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-400">
+                  Guarda l&apos;anteprima completa direttamente qui nell&apos;app prima di scaricare il file video finale sul tuo dispositivo.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                type="button"
+                disabled={isStitchingFinalVideo}
+                onClick={() =>
+                  mergedEpisodePreviewUrl
+                    ? handleDownloadMergedPreviewVideo()
+                    : handleRenderAndMergeCompleteLocalVideo(true)
+                }
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-amber-500 hover:from-emerald-400 hover:to-amber-400 text-zinc-950 font-black text-xs uppercase tracking-wider shadow-lg transition disabled:opacity-50"
+              >
+                <Download className="w-4 h-4" />
+                Scarica Video Finale su PC / Telefono
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-col items-center justify-center bg-zinc-950 border border-zinc-800 rounded-xl p-4">
+            <video
+              key={
+                mergedEpisodePreviewUrl ||
+                playableClips[currentPlaylistIdx]?.videoUrl
+              }
+              src={
+                mergedEpisodePreviewUrl ||
+                playableClips[currentPlaylistIdx]?.videoUrl
+              }
+              controls
+              playsInline
+              onEnded={() => {
+                if (
+                  !mergedEpisodePreviewUrl &&
+                  currentPlaylistIdx < playableClips.length - 1
+                ) {
+                  setCurrentPlaylistIdx(currentPlaylistIdx + 1);
+                }
+              }}
+              className={`rounded-xl border border-zinc-800 bg-black shadow-2xl ${
+                aspectRatio === '9:16'
+                  ? 'max-h-[460px] aspect-[9/16]'
+                  : 'w-full max-w-2xl aspect-video'
+              }`}
+            />
+            {!mergedEpisodePreviewUrl && playableClips.length > 1 && (
+              <div className="flex flex-wrap items-center justify-center gap-2 mt-3">
+                {playableClips.map((clip, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => setCurrentPlaylistIdx(idx)}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold border transition ${
+                      currentPlaylistIdx === idx
+                        ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
+                        : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {clip.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1222,7 +1375,9 @@ export default function StoryboardStudioView({
                         <video
                           src={shot.videoUrl}
                           controls
+                          autoPlay
                           loop
+                          playsInline
                           className="absolute inset-0 w-full h-full object-cover z-20"
                         />
                       ) : (
@@ -1304,14 +1459,14 @@ export default function StoryboardStudioView({
                       {renderingVideoShotId === shot.id ? (
                         <>
                           <Loader2 className="w-4 h-4 animate-spin" />
-                          Generazione Clip 5s (Scena + Voce)...
+                          Nano Banana Motion + Voce (5s)...
                         </>
                       ) : (
                         <>
                           <Sparkles className="w-4 h-4" />
                           {shot.videoUrl
-                            ? 'Rigenera Clip Video AI (5s - Locale)'
-                            : 'Genera Clip Video AI (5s - Locale)'}
+                            ? 'Rigenera Clip con Nano Banana (5s)'
+                            : 'Genera Clip con Nano Banana (5s - Anteprima)'}
                         </>
                       )}
                     </button>

@@ -350,6 +350,9 @@ export default function SeriesHubView({
 
         const clipDataUrl = await renderShotVideoDataUrl({
           frameImageBase64: frameImg,
+          framesBase64: Array.isArray(mediaData.framesBase64)
+            ? mediaData.framesBase64
+            : undefined,
           audioWavBase64: mediaData.audioWavBase64,
           dialogueIta: shot.dialogueIta,
           speakerName: speaker?.name,
