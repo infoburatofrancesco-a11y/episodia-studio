@@ -329,6 +329,21 @@ export default function StoryboardStudioView({
         throw new Error(mediaData.error || 'Errore API Nano Banana.');
       }
 
+      if (mediaData.vertexNotice) {
+        setShotRenderError(mediaData.vertexNotice);
+      }
+
+      // Se Google Veo 3 (Vertex AI) ha restituito il video MP4 fluido nativo dal frame di Nano Banana, usiamo quello!
+      if (mediaData.veoVideoBase64) {
+        await saveLocalGeneratedVideo(shot.id, mediaData.veoVideoBase64);
+        await handleShotChange(shot.id, {
+          videoUrl: mediaData.veoVideoBase64,
+          localMediaKey: shot.id,
+          status: 'ready',
+        });
+        return mediaData.veoVideoBase64;
+      }
+
       const frameImg =
         mediaData.frameImageBase64 ||
         refPhotos[0] ||

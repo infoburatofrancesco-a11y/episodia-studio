@@ -4,6 +4,8 @@ import { GoogleGenAI } from '@google/genai';
 // Estende il timeout delle Serverless Functions su Vercel fino a 60 secondi
 export const maxDuration = 60;
 
+const GOOGLE_CLOUD_PROJECT_NUMBER = '444672191323';
+
 interface GenerateShotMediaBody {
   visualPromptEn: string;
   dialogueIta?: string;
@@ -106,6 +108,107 @@ async function generateSingleNanoBananaFrame(
   return null;
 }
 
+/**
+ * Converte il fotogramma generato da Nano Banana in un VERO VIDEO MP4 ANIMATO FLUIDO
+ * tramite Google Veo 3 (Vertex AI Image-to-Video) sul progetto Cloud 444672191323.
+ */
+async function tryGenerateFluidVeoVideoFromFrame(
+  apiKey: string,
+  frameDataUrl: string,
+  visualPromptEn: string,
+  dialogueIta: string | undefined,
+  aspectRatio: '9:16' | '16:9'
+): Promise<{ videoBase64: string | null; vertexNotice?: string }> {
+  const parsed = parseDataUrl(frameDataUrl);
+  if (!parsed) return { videoBase64: null };
+
+  const veoModels = [
+    'veo-3.0-fast-generate-001',
+    'veo-3.0-generate-001',
+    'veo-2.0-generate-001',
+  ];
+
+  const fullPrompt = dialogueIta?.trim()
+    ? `${visualPromptEn}. Natural fluid human/animal movement, expressive gesturing and speaking in Italian: "${dialogueIta.trim()}"`
+    : `${visualPromptEn}. Natural fluid character movement and expressive acting.`;
+
+  for (const veoModel of veoModels) {
+    try {
+      const startUrl = `https://aiplatform.googleapis.com/v1beta1/projects/${GOOGLE_CLOUD_PROJECT_NUMBER}/locations/us-central1/publishers/google/models/${veoModel}:predictLongRunning?key=${apiKey}`;
+
+      const startRes = await fetch(startUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          instances: [
+            {
+              prompt: fullPrompt,
+              image: {
+                bytesBase64Encoded: parsed.data,
+                mimeType: parsed.mimeType,
+              },
+            },
+          ],
+          parameters: {
+            aspectRatio,
+            sampleCount: 1,
+            durationSeconds: 5,
+            personGeneration: 'allow_all',
+          },
+        }),
+      });
+
+      if (!startRes.ok) {
+        const errText = await startRes.text();
+        if (errText.includes('SERVICE_DISABLED') || startRes.status === 403) {
+          return {
+            videoBase64: null,
+            vertexNotice: `Per il movimento video fluido nativo con Google Veo 3 abilita con 1 clic l'API Vertex AI sul tuo progetto Google Cloud: https://console.developers.google.com/apis/api/aiplatform.googleapis.com/overview?project=${GOOGLE_CLOUD_PROJECT_NUMBER}`,
+          };
+        }
+        continue;
+      }
+
+      const opData = await startRes.json();
+      const opName: string | undefined = opData.name;
+      if (!opName) continue;
+
+      // Polling dell'operazione Veo 3 (fino a ~42 secondi)
+      const fetchOpUrl = `https://aiplatform.googleapis.com/v1beta1/projects/${GOOGLE_CLOUD_PROJECT_NUMBER}/locations/us-central1/publishers/google/models/${veoModel}:fetchPredictOperation?key=${apiKey}`;
+
+      for (let attempt = 0; attempt < 14; attempt++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const pollRes = await fetch(fetchOpUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operationName: opName }),
+        });
+
+        if (!pollRes.ok) continue;
+        const pollJson = await pollRes.json();
+        if (pollJson.done) {
+          const videos =
+            pollJson.response?.videos ||
+            pollJson.response?.generatedSamples ||
+            [];
+          const firstVid = videos[0]?.video || videos[0];
+          if (firstVid?.bytesBase64Encoded) {
+            const mime = firstVid.mimeType || 'video/mp4';
+            return {
+              videoBase64: `data:${mime};base64,${firstVid.bytesBase64Encoded}`,
+            };
+          }
+          break;
+        }
+      }
+    } catch (veoErr) {
+      console.warn(`Fallback da Veo (${veoModel}):`, veoErr);
+    }
+  }
+
+  return { videoBase64: null };
+}
+
 export async function POST(req: NextRequest) {
   try {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -127,7 +230,6 @@ export async function POST(req: NextRequest) {
 
     const ai = new GoogleGenAI({ apiKey });
 
-    // Usiamo max 2 foto di riferimento per velocizzare la risposta sotto i 5 secondi
     const refParts: Array<{ inlineData: { mimeType: string; data: string } }> =
       [];
     for (const refImg of referenceImagesBase64.slice(0, 2)) {
@@ -216,18 +318,37 @@ export async function POST(req: NextRequest) {
       framesBase64.push(...referenceImagesBase64.slice(0, 2));
     }
 
+    // Se abbiamo il fotogramma generato da Nano Banana, proviamo a convertirlo in un vero video MP4 fluido con Veo 3!
+    let veoVideoBase64: string | null = null;
+    let vertexNotice: string | undefined;
+    if (framesBase64[0]) {
+      const veoResult = await tryGenerateFluidVeoVideoFromFrame(
+        apiKey,
+        framesBase64[0],
+        visualPromptEn,
+        dialogueIta,
+        aspectRatio
+      );
+      veoVideoBase64 = veoResult.videoBase64;
+      vertexNotice = veoResult.vertexNotice;
+    }
+
     return NextResponse.json({
       frameImageBase64: framesBase64[0] || null,
       framesBase64,
       audioWavBase64,
-      modelUsed: 'gemini-nano-banana-2.1',
+      veoVideoBase64,
+      vertexNotice,
+      modelUsed: veoVideoBase64
+        ? 'gemini-nano-banana-2.1 + veo-3.0-fast-generate-001'
+        : 'gemini-nano-banana-2.1',
     });
   } catch (error: unknown) {
     console.error('Errore in /api/generate-shot-media:', error);
     const msg =
       error instanceof Error
         ? error.message
-        : 'Errore imprevisto durante la generazione Nano Banana dello shot.';
+        : 'Errore imprevisto durante la generazione Nano Banana + Veo dello shot.';
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
