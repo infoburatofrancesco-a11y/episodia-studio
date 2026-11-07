@@ -363,69 +363,75 @@ export default function StoryboardStudioView({
       const rawRefPhoto = rawRefList[0] || cast[0]?.referenceImageBase64;
 
       // MODALITÀ 1: GOOGLE VEO 3.1 NATIVO ("Ingredients to Video" come nell'app Gemini Web)
-      // Se è presente una chiave Google AI Studio (AIzaSy...) o se il server ha Veo 3.1 sbloccato,
-      // genera un VERO video MP4 nativo in cui gli attori si muovono, interagiscono e parlano!
-      try {
-        setShotProgressText(
-          'Avvio Google Veo 3.1 (Ingredients to Video con foto attori)...'
-        );
-        const veoStartRes = await fetch('/api/generate-veo-video', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'start',
-            customApiKey: veoApiKey.trim() || undefined,
-            visualPromptEn: shot.visualPromptEn,
-            dialogueIta: shot.dialogueIta,
-            speakerName: speaker?.name,
-            characterNames: orderedChars.map((c) => c.name),
-            aspectRatio,
-            referenceImagesBase64: compressedRefs,
-          }),
-        });
+      // Si attiva non appena è presente una chiave Google AI Studio (AIzaSy...)
+      if (veoApiKey.trim().startsWith('AIza')) {
+        try {
+          setShotProgressText(
+            'Avvio Google Veo 3.1 (Ingredients to Video con foto attori)...'
+          );
+          const veoStartRes = await fetch('/api/generate-veo-video', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'start',
+              customApiKey: veoApiKey.trim(),
+              visualPromptEn: shot.visualPromptEn,
+              dialogueIta: shot.dialogueIta,
+              speakerName: speaker?.name,
+              characterNames: orderedChars.map((c) => c.name),
+              aspectRatio,
+              referenceImagesBase64: compressedRefs,
+            }),
+          });
 
-        if (veoStartRes.ok) {
-          const veoStartData = await veoStartRes.json();
-          if (veoStartData.ok && veoStartData.operationName) {
-            for (let attempt = 1; attempt <= 28; attempt++) {
-              setShotProgressText(
-                `Google Veo 3.1 sta generando il video animato reale (${attempt * 5}s)...`
-              );
-              await new Promise((r) => setTimeout(r, 5000));
-              const pollRes = await fetch('/api/generate-veo-video', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  action: 'poll',
-                  operationName: veoStartData.operationName,
-                  customApiKey: veoApiKey.trim() || undefined,
-                }),
-              });
-              const pollData = await pollRes.json();
-              if (pollData.done && pollData.videoDataUrl) {
-                await saveLocalGeneratedVideo(shot.id, pollData.videoDataUrl);
-                await handleShotChange(shot.id, {
-                  videoUrl: pollData.videoDataUrl,
-                  localMediaKey: shot.id,
-                  duration: 10,
-                  status: 'ready',
+          if (veoStartRes.ok) {
+            const veoStartData = await veoStartRes.json();
+            if (veoStartData.ok && veoStartData.operationName) {
+              for (let attempt = 1; attempt <= 28; attempt++) {
+                setShotProgressText(
+                  `Google Veo 3.1 sta generando il video animato reale (${attempt * 5}s)...`
+                );
+                await new Promise((r) => setTimeout(r, 5000));
+                const pollRes = await fetch('/api/generate-veo-video', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    action: 'poll',
+                    operationName: veoStartData.operationName,
+                    customApiKey: veoApiKey.trim(),
+                  }),
                 });
-                setMergedEpisodePreviewUrl(null);
-                return pollData.videoDataUrl;
-              }
-              if (pollData.done && pollData.error) {
-                console.warn('Veo 3.1 poll error, fallback Nano Banana:', pollData.error);
-                break;
+                const pollData = await pollRes.json();
+                if (pollData.done && pollData.videoDataUrl) {
+                  await saveLocalGeneratedVideo(shot.id, pollData.videoDataUrl);
+                  await handleShotChange(shot.id, {
+                    videoUrl: pollData.videoDataUrl,
+                    localMediaKey: shot.id,
+                    duration: 10,
+                    status: 'ready',
+                  });
+                  setMergedEpisodePreviewUrl(null);
+                  return pollData.videoDataUrl;
+                }
+                if (pollData.done && pollData.error) {
+                  console.warn(
+                    'Veo 3.1 poll error, fallback Nano Banana Pro:',
+                    pollData.error
+                  );
+                  break;
+                }
               }
             }
           }
+        } catch (veoErr) {
+          console.warn('Fallback da Veo 3.1 a Nano Banana Pro:', veoErr);
         }
-      } catch (veoErr) {
-        console.warn('Fallback da Veo 3.1 a Nano Banana:', veoErr);
       }
 
-      // MODALITÀ 2 (Fallback se la chiave è AQ.Ab8RN... bloccata su PredictLongRunning):
-      // CHIAMATA 1 (Veloce < 8s): Scena Base (Fedeltà 1:1 alle foto originali) + Voce Italiana Madrelingua
+      // MODALITÀ 2 (Con chiave AQ.Ab8RN...): Nano Banana Pro (Fedeltà 1:1 alle foto) + Multi-Speaker TTS Italiano
+      setShotProgressText(
+        'Passo 1/3: Nano Banana Pro sta creando la scena 1:1 dalle tue foto + Dialogo Italiano...'
+      );
       const mediaRes = await fetch('/api/generate-shot-media', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -474,13 +480,13 @@ export default function StoryboardStudioView({
 
       const framesList: string[] = [frame1];
 
-      // CHIAMATA 2 (In parallelo < 7s): Genera 2 pose parlate (bocca aperta + gesto / bocca semi-aperta + espressione)
+      // CHIAMATA 2 (In parallelo < 7s): Genera 3 pose interattive (bocca aperta + gesto / bocca semi-aperta / reazione finale di gruppo)
       try {
         setShotProgressText(
-          'Passo 2/3: Nano Banana sta animando labiale, espressione e gesti del personaggio...'
+          'Passo 2/3: Animazione labiale, gesti e interazione tra gli attori...'
         );
         const compressedFrame1 = await compressImageForApi(frame1, 768);
-        const [varResOpen, varResGesture] = await Promise.all([
+        const [varResOpen, varResGesture, varResReaction] = await Promise.all([
           fetch('/api/generate-shot-media', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -489,6 +495,7 @@ export default function StoryboardStudioView({
               baseFrameBase64: compressedFrame1,
               variantType: 'speaking_open',
               speakerName: speaker?.name,
+              characterNames: orderedChars.map((c) => c.name),
               visualPromptEn: shot.visualPromptEn,
               aspectRatio,
             }),
@@ -501,6 +508,20 @@ export default function StoryboardStudioView({
               baseFrameBase64: compressedFrame1,
               variantType: 'speaking_gesture',
               speakerName: speaker?.name,
+              characterNames: orderedChars.map((c) => c.name),
+              visualPromptEn: shot.visualPromptEn,
+              aspectRatio,
+            }),
+          }).catch(() => null),
+          fetch('/api/generate-shot-media', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              step: 'variant',
+              baseFrameBase64: compressedFrame1,
+              variantType: 'group_reaction',
+              speakerName: speaker?.name,
+              characterNames: orderedChars.map((c) => c.name),
               visualPromptEn: shot.visualPromptEn,
               aspectRatio,
             }),
@@ -517,6 +538,12 @@ export default function StoryboardStudioView({
           const jsonGesture = await varResGesture.json();
           if (jsonGesture.frameImageBase64) {
             framesList.push(jsonGesture.frameImageBase64);
+          }
+        }
+        if (varResReaction && varResReaction.ok) {
+          const jsonReaction = await varResReaction.json();
+          if (jsonReaction.frameImageBase64) {
+            framesList.push(jsonReaction.frameImageBase64);
           }
         }
       } catch {

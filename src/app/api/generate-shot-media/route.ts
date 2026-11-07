@@ -1,13 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
 
-// Estende il timeout delle Serverless Functions su Vercel fino a 60 secondi
+// Edge Runtime su Vercel consente fino a 30s di streaming/risposta anche su piano Hobby,
+// permettendo a nano-banana-pro-preview (14s) di completare sempre senza timeout 504!
+export const runtime = 'edge';
 export const maxDuration = 60;
 
 interface GenerateShotMediaBody {
   step?: 'base' | 'variant';
   baseFrameBase64?: string;
-  variantType?: 'speaking' | 'reaction' | 'speaking_open' | 'speaking_gesture';
+  variantType?:
+    | 'speaking'
+    | 'reaction'
+    | 'speaking_open'
+    | 'speaking_gesture'
+    | 'group_reaction';
   visualPromptEn: string;
   cameraAngle?: string;
   dialogueIta?: string;
@@ -30,32 +37,60 @@ function parseDataUrl(
   return null;
 }
 
-// Converte audio PCM 16-bit 24kHz mono (restituito da Gemini TTS) in un file WAV standard Base64
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binaryStr = atob(base64);
+  const len = binaryStr.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const sub = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...Array.from(sub));
+  }
+  return btoa(binary);
+}
+
+function writeAsciiString(view: DataView, offset: number, str: string) {
+  for (let i = 0; i < str.length; i++) {
+    view.setUint8(offset + i, str.charCodeAt(i));
+  }
+}
+
+// Converte audio PCM 16-bit 24kHz mono in un file WAV standard Base64 (compatibile Edge Runtime)
 function pcm24kMonoToWavBase64(pcmBase64: string, sampleRate = 24000): string {
-  const pcmBuffer = Buffer.from(pcmBase64, 'base64');
+  const pcmBytes = base64ToUint8Array(pcmBase64);
   const numChannels = 1;
   const bitsPerSample = 16;
   const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
   const blockAlign = (numChannels * bitsPerSample) / 8;
-  const dataSize = pcmBuffer.length;
-  const wavHeader = Buffer.alloc(44);
+  const dataSize = pcmBytes.byteLength;
 
-  wavHeader.write('RIFF', 0);
-  wavHeader.writeUInt32LE(36 + dataSize, 4);
-  wavHeader.write('WAVE', 8);
-  wavHeader.write('fmt ', 12);
-  wavHeader.writeUInt32LE(16, 16);
-  wavHeader.writeUInt16LE(1, 20);
-  wavHeader.writeUInt16LE(numChannels, 22);
-  wavHeader.writeUInt32LE(sampleRate, 24);
-  wavHeader.writeUInt32LE(byteRate, 28);
-  wavHeader.writeUInt16LE(blockAlign, 32);
-  wavHeader.writeUInt16LE(bitsPerSample, 34);
-  wavHeader.write('data', 36);
-  wavHeader.writeUInt32LE(dataSize, 40);
+  const wavBytes = new Uint8Array(44 + dataSize);
+  const view = new DataView(wavBytes.buffer);
 
-  const wavBuffer = Buffer.concat([wavHeader, pcmBuffer]);
-  return `data:audio/wav;base64,${wavBuffer.toString('base64')}`;
+  writeAsciiString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeAsciiString(view, 8, 'WAVE');
+  writeAsciiString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeAsciiString(view, 36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  wavBytes.set(pcmBytes, 44);
+  return `data:audio/wav;base64,${uint8ArrayToBase64(wavBytes)}`;
 }
 
 const MALE_VOICES = ['Orus', 'Puck', 'Fenrir', 'Charon'];
@@ -93,7 +128,7 @@ function isFemaleSpeaker(speakerName?: string, descriptor?: string): boolean {
   ) {
     return false;
   }
-  return name.endsWith('a') && !name.endsWith('ia') ? true : false;
+  return name.endsWith('a') && !name.endsWith('ia');
 }
 
 function pickVoiceForSpeaker(
@@ -113,15 +148,24 @@ function pickVoiceForSpeaker(
 async function generateSingleNanoBananaFrame(
   ai: GoogleGenAI,
   refParts: Array<{ inlineData: { mimeType: string; data: string } }>,
-  promptText: string
+  promptText: string,
+  preferFastInPlaceEdit = false
 ): Promise<string | null> {
-  // Priorità assoluta ai modelli Nano Banana dedicati alla fedeltà fotografica 1:1 del volto
-  const nanoBananaModels = [
-    'gemini-nano-banana-2.1',
-    'nano-banana-pro-preview',
-    'gemini-3-pro-image',
-    'gemini-3.1-flash-image',
-  ];
+  // Per il Frame 0 Master usiamo Nano Banana Pro (massima fedeltà 1:1 a volti, vestiti, parrucche, cappelli e animali dalle foto).
+  // Per le varianti in-place veloci usiamo gemini-2.5-flash-image (6s) + nano-banana-2.1.
+  const nanoBananaModels = preferFastInPlaceEdit
+    ? [
+        'gemini-2.5-flash-image',
+        'gemini-nano-banana-2.1',
+        'gemini-3.1-flash-image',
+        'nano-banana-pro-preview',
+      ]
+    : [
+        'nano-banana-pro-preview',
+        'gemini-3-pro-image',
+        'gemini-nano-banana-2.1',
+        'gemini-2.5-flash-image',
+      ];
 
   for (const modelName of nanoBananaModels) {
     try {
@@ -186,19 +230,24 @@ export async function POST(req: NextRequest) {
         ? 'vertical 9:16 portrait smartphone social format'
         : 'horizontal 16:9 widescreen cinematic format';
 
-    const targetSpeaker = speakerName || characterNames[0] || 'the main character';
+    const targetSpeaker =
+      speakerName || characterNames[0] || 'the main character';
 
-    // PASSO VARIANTE IN-PLACE: mantiene sfondo, vestiti e volto IDENTICI al 100% al Frame 0,
-    // animando SOLO bocca, espressione e gesto delle mani per il lip-sync reale!
+    // PASSO VARIANTE IN-PLACE: mantiene sfondo, vestiti e volti IDENTICI al 100% al Frame 0,
+    // animando bocca, espressioni e interazione tra gli attori!
     if (step === 'variant' && baseFrameBase64) {
       const parsedBase = parseDataUrl(baseFrameBase64);
       if (!parsedBase) {
         return NextResponse.json({ frameImageBase64: null });
       }
-      const variantPrompt =
-        variantType === 'speaking_open' || variantType === 'speaking'
-          ? `IN-PLACE PHOTO EDIT (${orientationLabel}): Keep 100% of the exact same background, room, camera angle, lighting, clothing, and exact facial identity from this image unchanged. ONLY animate ${targetSpeaker} speaking a vowel syllable: ${targetSpeaker}'s mouth is naturally open mid-speech pronouncing 'Ah', lively eyes, and an active conversational hand gesture. Do not change anyone's face or background. No text overlays.`
-          : `IN-PLACE PHOTO EDIT (${orientationLabel}): Keep 100% of the exact same background, room, camera angle, lighting, clothing, and exact facial identity from this image unchanged. ONLY animate ${targetSpeaker} mid-sentence: ${targetSpeaker}'s mouth is half-open speaking a word with a warm expressive smile, slight natural head tilt, and shifted hand gesture. Do not change anyone's face or background. No text overlays.`;
+      let variantPrompt = '';
+      if (variantType === 'speaking_open' || variantType === 'speaking') {
+        variantPrompt = `IN-PLACE PHOTO EDIT (${orientationLabel}): Keep 100% of the exact same background, room, camera angle, lighting, clothing, hats/accessories, and exact facial identities from this image unchanged. ONLY animate ${targetSpeaker} speaking expressively: ${targetSpeaker}'s mouth is naturally open pronouncing a vowel ('Ah'/'Oh') with an active conversational hand gesture, while the other characters/animals in the shot look at ${targetSpeaker} and react with lively expressions. No text overlays.`;
+      } else if (variantType === 'speaking_gesture') {
+        variantPrompt = `IN-PLACE PHOTO EDIT (${orientationLabel}): Keep 100% of the exact same background, room, camera angle, lighting, clothing, hats/accessories, and exact facial identities from this image unchanged. ONLY animate ${targetSpeaker} mid-sentence: ${targetSpeaker}'s mouth is half-open speaking with a warm expressive smile, slight natural head tilt, and shifted hand position, while the other characters/animals in the shot interact naturally. No text overlays.`;
+      } else {
+        variantPrompt = `IN-PLACE PHOTO EDIT (${orientationLabel}): Keep 100% of the exact same background, room, camera angle, lighting, clothing, hats/accessories, and exact facial identities from this image unchanged. Animate a joyful group reaction moment: all characters in the shot are smiling/laughing warmly and interacting together (clapping, petting the dog/pet if present, or sharing a comedic reaction), with mouths closed or smiling naturally. No text overlays.`;
+      }
 
       const variantFrame = await generateSingleNanoBananaFrame(
         ai,
@@ -210,16 +259,18 @@ export async function POST(req: NextRequest) {
             },
           },
         ],
-        variantPrompt
+        variantPrompt,
+        true
       );
 
       return NextResponse.json({
         frameImageBase64: variantFrame,
-        modelUsed: 'gemini-nano-banana-2.1',
+        modelUsed: 'gemini-2.5-flash-image',
       });
     }
 
-    // PASSO BASE: invia fino a 4 foto reali di riferimento del Cast per mantenere la somiglianza 1:1
+    // PASSO BASE: invia fino a 4 foto reali di riferimento del Cast a Nano Banana Pro
+    // per preservare 1:1 i soggetti, i vestiti, gli accessori e gli animali domestici!
     const refParts: Array<{ inlineData: { mimeType: string; data: string } }> =
       [];
     for (const refImg of referenceImagesBase64.slice(0, 4)) {
@@ -236,18 +287,17 @@ export async function POST(req: NextRequest) {
 
     const castNamesList =
       characterNames.length > 0
-        ? `Characters present in this shot (matching the attached reference photos in order): ${characterNames.join(', ')}. Active speaker: ${targetSpeaker}.`
-        : `Active speaker matching the attached reference photo: ${targetSpeaker}.`;
+        ? `Subjects from the attached reference photos to include together interacting in this shot: ${characterNames.join(', ')}. Active speaker: ${targetSpeaker}.`
+        : `Subject from the attached reference photo: ${targetSpeaker}.`;
 
-    const masterPrompt = `STRICT 1:1 PHOTOGRAPHIC IDENTITY LOCK (${orientationLabel}): Place the EXACT real person(s)/animal(s) from the attached reference photo(s) into this scene.
-- CRITICAL: Preserve 100% of the exact real face, eye shape, nose, mouth, hair, beard/stubble, age, and natural skin texture from the reference photo(s). Do NOT replace them with generic AI faces or alter their likeness.
-- Style: Authentic, unretouched real iPhone 16 Pro video frame, natural daylight/indoor lighting, realistic skin pores, zero CGI or plastic look.
+    const masterPrompt = `Using the exact subjects from these reference photos, create a realistic live-action photograph (${orientationLabel}) where the actors interact naturally with each other.
+- STRICT 1:1 IDENTITY & APPEARANCE LOCK: Preserve 100% of the exact real faces, facial features, hair/wigs, hats, glasses, clothing, and pets/animals directly from the attached reference photos. Do NOT replace them with generic models or alter their faces.
 - ${castNamesList}
-- Framing & Scene: ${cameraAngle || 'Medium selfie shot'}. ${visualPromptEn}.
-- Pose for Keyframe 0: ${targetSpeaker} is looking at the camera with a natural, realistic closed-mouth or gentle smile expression just before speaking. No text overlays, no watermarks.`;
+- Camera & Scene Action: ${cameraAngle || 'Medium shot'}. ${visualPromptEn}.
+- Keyframe 0 Pose: The actors are together in the scene interacting naturally; ${targetSpeaker} has a natural closed-mouth or gentle smile expression just before speaking. Photorealistic iPhone 16 Pro video frame, natural lighting, no text overlays, no watermarks.`;
 
     const [frame1, audioWavBase64] = await Promise.all([
-      generateSingleNanoBananaFrame(ai, refParts, masterPrompt),
+      generateSingleNanoBananaFrame(ai, refParts, masterPrompt, false),
       (async (): Promise<string | null> => {
         if (!dialogueIta || !dialogueIta.trim()) return null;
         const cleanDialogue = dialogueIta
@@ -256,15 +306,56 @@ export async function POST(req: NextRequest) {
           .trim();
         if (!cleanDialogue) return null;
 
-        const voiceName = pickVoiceForSpeaker(speakerName, speakerDescriptor);
-        // Priorità a gemini-2.5-pro-preview-tts con languageCode: 'it-IT' per dizione italiana madrelingua naturale e calda
+        // Controlliamo se il dialogo contiene un botta-e-risposta tra più personaggi (es. "Cristina: ... \n Cesco: ...")
+        const speakerLines = cleanDialogue
+          .split(/\n+/)
+          .map((l) => l.trim())
+          .filter(Boolean);
+        const multiSpeakerMatches = speakerLines
+          .map((l) => l.match(/^([A-Za-zÀ-ÿ0-9_ ]{2,20}):\s*(.+)$/))
+          .filter((m): m is RegExpMatchArray => Boolean(m));
+
+        const uniqueSpeakers = Array.from(
+          new Set(multiSpeakerMatches.map((m) => m[1].trim()))
+        );
+
         const ttsModels = [
           'gemini-2.5-pro-preview-tts',
-          'gemini-3.8-flash-tts',
           'gemini-2.5-flash-preview-tts',
+          'gemini-3.8-flash-tts',
         ];
+
         for (const ttsModel of ttsModels) {
           try {
+            const speechConfig =
+              uniqueSpeakers.length >= 2
+                ? {
+                    languageCode: 'it-IT',
+                    multiSpeakerVoiceConfig: {
+                      speakerVoiceConfigs: uniqueSpeakers
+                        .slice(0, 2)
+                        .map((spName) => ({
+                          speaker: spName,
+                          voiceConfig: {
+                            prebuiltVoiceConfig: {
+                              voiceName: pickVoiceForSpeaker(spName),
+                            },
+                          },
+                        })),
+                    },
+                  }
+                : {
+                    languageCode: 'it-IT',
+                    voiceConfig: {
+                      prebuiltVoiceConfig: {
+                        voiceName: pickVoiceForSpeaker(
+                          speakerName,
+                          speakerDescriptor
+                        ),
+                      },
+                    },
+                  };
+
             const ttsRes = await ai.models.generateContent({
               model: ttsModel,
               contents: [
@@ -279,14 +370,7 @@ export async function POST(req: NextRequest) {
               ],
               config: {
                 responseModalities: ['AUDIO'],
-                speechConfig: {
-                  languageCode: 'it-IT',
-                  voiceConfig: {
-                    prebuiltVoiceConfig: {
-                      voiceName,
-                    },
-                  },
-                },
+                speechConfig,
               },
             });
 
@@ -317,7 +401,7 @@ export async function POST(req: NextRequest) {
       frameImageBase64: framesBase64[0] || null,
       framesBase64,
       audioWavBase64,
-      modelUsed: 'gemini-nano-banana-2.1',
+      modelUsed: 'nano-banana-pro-preview',
     });
   } catch (error: unknown) {
     console.error('Errore in /api/generate-shot-media:', error);

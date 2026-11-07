@@ -472,12 +472,19 @@ export async function renderShotVideoDataUrl(
         ctx.fillRect(0, 0, width, height);
 
         // MACCHINA A STATI LIP-SYNC & GESTI IN TEMPO REALE (100% opacità nitida, zero effetto fantasma!)
-        // Frame 0 = Bocca chiusa / posa neutra (usata sempre nelle pause e a fine battuta)
+        // Frame 0 = Bocca chiusa / posa neutra (usata nelle pause tra le parole)
         // Frame 1 = Bocca aperta (vocale) + gesto attivo della mano
-        // Frame 2 = Bocca semi-aperta (consonante/sorriso parlato) + inclinazione testa
+        // Frame 2 = Bocca semi-aperta (consonante/sorriso parlato) + interazione
+        // Frame 3 = Reazione finale di gruppo / sorriso a fine battuta
         if (loadedFrames.length > 1) {
-          if (!isWithinSpeechWindow || rmsEnergy < 0.016) {
-            // Quando il personaggio fa una pausa o ha finito di parlare, chiude subito la bocca (Frame 0)!
+          if (!isWithinSpeechWindow) {
+            const endReactionIdx = loadedFrames.length >= 4 ? 3 : 0;
+            if (currentPoseIdx !== endReactionIdx && elapsed - lastPoseSwitchMs >= 140) {
+              currentPoseIdx = endReactionIdx;
+              lastPoseSwitchMs = elapsed;
+            }
+          } else if (rmsEnergy < 0.016) {
+            // Quando il personaggio fa una pausa tra due frasi, chiude subito la bocca (Frame 0)!
             if (currentPoseIdx !== 0 && elapsed - lastPoseSwitchMs >= 140) {
               currentPoseIdx = 0;
               lastPoseSwitchMs = elapsed;
