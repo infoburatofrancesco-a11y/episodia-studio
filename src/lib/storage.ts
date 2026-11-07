@@ -10,7 +10,7 @@ import type {
 export const CAST_STORAGE_KEY = 'episodia_cast';
 export const SERIES_STORAGE_KEY = 'episodia_series';
 export const EPISODES_STORAGE_KEY = 'episodia_episodes';
-export const LOCAL_MEDIA_STORAGE_KEY = 'episodia_local_media_v5_lipsync';
+export const LOCAL_MEDIA_STORAGE_KEY = 'episodia_local_media_v6_i2v24fps';
 export const CLOUD_CONFIG_STORAGE_KEY = 'episodia_cloud_config';
 
 // ============================================================================

@@ -1,6 +1,7 @@
 export interface RenderShotVideoParams {
   frameImageBase64: string;
   framesBase64?: string[];
+  aiVideoDataUrl?: string | null;
   audioWavBase64?: string | null;
   dialogueIta?: string;
   speakerName?: string;
@@ -278,9 +279,35 @@ function drawCoverImage(
   ctx.restore();
 }
 
+function drawCoverVideo(
+  ctx: CanvasRenderingContext2D,
+  videoEl: HTMLVideoElement,
+  width: number,
+  height: number
+) {
+  const vw = videoEl.videoWidth || width;
+  const vh = videoEl.videoHeight || height;
+  const vidRatio = vw / vh;
+  const canvasRatio = width / height;
+  let drawW = width;
+  let drawH = height;
+  if (vidRatio > canvasRatio) {
+    drawH = height;
+    drawW = height * vidRatio;
+  } else {
+    drawW = width;
+    drawH = width / vidRatio;
+  }
+
+  ctx.save();
+  ctx.translate(width / 2, height / 2);
+  ctx.drawImage(videoEl, -drawW / 2, -drawH / 2, drawW, drawH);
+  ctx.restore();
+}
+
 /**
- * Renderizza un singolo Shot di 5s animando i fotogrammi generati da Nano Banana (`framesBase64`)
- * sincronizzati con la voce recitata italiana.
+ * Renderizza un singolo Shot di 10s unendo il vero video AI 24fps (aiVideoDataUrl)
+ * con la voce recitata italiana e i sottotitoli.
  */
 export async function renderShotVideoDataUrl(
   params: RenderShotVideoParams
@@ -288,6 +315,7 @@ export async function renderShotVideoDataUrl(
   const {
     frameImageBase64,
     framesBase64 = [],
+    aiVideoDataUrl,
     audioWavBase64,
     dialogueIta = '',
     speakerName = '',
@@ -350,8 +378,47 @@ export async function renderShotVideoDataUrl(
       loadedFrames.push(await loadImage(frameImageBase64));
     }
 
+    // Se è stato generato il vero video AI 24fps (aiVideoDataUrl), lo carichiamo in un elemento <video>
+    let aiVideoEl: HTMLVideoElement | null = null;
+    if (aiVideoDataUrl) {
+      try {
+        const vEl = document.createElement('video');
+        vEl.src = normalizeVideoDataUrl(aiVideoDataUrl);
+        vEl.muted = true;
+        vEl.loop = true;
+        vEl.playsInline = true;
+        vEl.crossOrigin = 'anonymous';
+        await new Promise<void>((resVid) => {
+          const timeoutId = setTimeout(() => resVid(), 4000);
+          vEl.onloadeddata = () => {
+            clearTimeout(timeoutId);
+            resVid();
+          };
+          vEl.onerror = () => {
+            clearTimeout(timeoutId);
+            resVid();
+          };
+          vEl.load();
+        });
+        if (vEl.videoWidth > 0) {
+          // Adattiamo il playbackRate così il video AI 24fps scorre fluido per tutti i 10 secondi
+          if (vEl.duration && isFinite(vEl.duration) && vEl.duration < durationSeconds) {
+            vEl.playbackRate = Math.max(0.62, vEl.duration / durationSeconds);
+          }
+          await vEl.play().catch(() => {});
+          aiVideoEl = vEl;
+        }
+      } catch (vErr) {
+        console.warn('Fallback da aiVideoEl a frame:', vErr);
+      }
+    }
+
     // Disegna subito il primo fotogramma prima di far partire MediaRecorder
-    drawCoverImage(ctx, loadedFrames[0], width, height, 1.03, 0, 0, 0, 1);
+    if (aiVideoEl) {
+      drawCoverVideo(ctx, aiVideoEl, width, height);
+    } else {
+      drawCoverImage(ctx, loadedFrames[0], width, height, 1.03, 0, 0, 0, 1);
+    }
 
     const audioCtx = unlockSharedAudioContext();
     let dest: MediaStreamAudioDestinationNode | null = null;
@@ -402,6 +469,10 @@ export async function renderShotVideoDataUrl(
 
     const stopPromise = new Promise<Blob>((resolve) => {
       recorder.onstop = () => {
+        if (aiVideoEl) {
+          aiVideoEl.pause();
+          aiVideoEl.removeAttribute('src');
+        }
         const cleanMime = mimeType.split(';')[0] || 'video/webm';
         resolve(new Blob(chunks, { type: cleanMime }));
       };
@@ -432,10 +503,6 @@ export async function renderShotVideoDataUrl(
     const audioDurationMs = audioBuffer
       ? audioBuffer.duration * 1000
       : totalMs * 0.85;
-
-    let currentPoseIdx = 0;
-    let lastPoseSwitchMs = 0;
-    let syllableCounter = 0;
 
     await new Promise<void>((resolve) => {
       const timer = setInterval(() => {
@@ -471,73 +538,36 @@ export async function renderShotVideoDataUrl(
         ctx.fillStyle = '#09090b';
         ctx.fillRect(0, 0, width, height);
 
-        // MACCHINA A STATI LIP-SYNC & GESTI IN TEMPO REALE (100% opacità nitida, zero effetto fantasma!)
-        // Frame 0 = Bocca chiusa / posa neutra (usata nelle pause tra le parole)
-        // Frame 1 = Bocca aperta (vocale) + gesto attivo della mano
-        // Frame 2 = Bocca semi-aperta (consonante/sorriso parlato) + interazione
-        // Frame 3 = Reazione finale di gruppo / sorriso a fine battuta
-        if (loadedFrames.length > 1) {
-          if (!isWithinSpeechWindow) {
-            const endReactionIdx = loadedFrames.length >= 4 ? 3 : 0;
-            if (currentPoseIdx !== endReactionIdx && elapsed - lastPoseSwitchMs >= 140) {
-              currentPoseIdx = endReactionIdx;
-              lastPoseSwitchMs = elapsed;
-            }
-          } else if (rmsEnergy < 0.016) {
-            // Quando il personaggio fa una pausa tra due frasi, chiude subito la bocca (Frame 0)!
-            if (currentPoseIdx !== 0 && elapsed - lastPoseSwitchMs >= 140) {
-              currentPoseIdx = 0;
-              lastPoseSwitchMs = elapsed;
-            }
-          } else if (elapsed - lastPoseSwitchMs >= 230) {
-            syllableCounter++;
-            if (loadedFrames.length >= 3) {
-              if (syllableCounter % 5 === 0) {
-                // Breve chiusura labiale naturale tra le parole
-                currentPoseIdx = 0;
-              } else if (rmsEnergy >= 0.05) {
-                // Sillaba forte -> Bocca aperta + gesto A (Frame 1)
-                currentPoseIdx = currentPoseIdx === 1 ? 2 : 1;
-              } else {
-                // Sillaba media -> Bocca semi-aperta + gesto B (Frame 2)
-                currentPoseIdx = currentPoseIdx === 2 ? 1 : 2;
-              }
-            } else {
-              // Se ci sono 2 pose (chiusa e aperta), alterna a ritmo delle sillabe della voce
-              currentPoseIdx = currentPoseIdx === 0 ? 1 : 0;
-            }
-            lastPoseSwitchMs = elapsed;
+        if (aiVideoEl && aiVideoEl.videoWidth > 0) {
+          // Disegna il VERO video AI 24fps continuo generato da Image-to-Video (ZERO scatti!)
+          if (aiVideoEl.paused) {
+            aiVideoEl.play().catch(() => {});
           }
+          drawCoverVideo(ctx, aiVideoEl, width, height);
         } else {
-          currentPoseIdx = 0;
+          // Fallback fluido continuo a 24fps senza cambi bruschi a scatti ogni 230ms
+          const baseScale =
+            1.02 +
+            progress * 0.045 +
+            voiceEnergy * 0.008;
+          const panX = Math.sin(progress * Math.PI) * (width * 0.012);
+          const panY =
+            Math.sin(elapsed * 0.014) *
+            (height * 0.0035 * (0.2 + voiceEnergy * 0.8));
+          const tiltRad = Math.sin(elapsed * 0.006) * 0.003;
+
+          drawCoverImage(
+            ctx,
+            loadedFrames[0],
+            width,
+            height,
+            baseScale,
+            panX,
+            panY,
+            tiltRad,
+            1
+          );
         }
-
-        // Movimento naturale handheld 24fps + oscillazione del parlato sincronizzata all'energia vocale
-        const baseScale =
-          1.025 +
-          Math.sin(progress * Math.PI) * 0.03 +
-          voiceEnergy * 0.012;
-        const panX = Math.sin(elapsed * 0.0022) * (width * 0.01);
-        const panY =
-          Math.sin(elapsed * 0.019) *
-          (height * 0.0045 * (0.2 + voiceEnergy * 0.9));
-        const tiltRad =
-          Math.sin(elapsed * 0.008) * (0.002 + voiceEnergy * 0.004);
-
-        const currentFrame =
-          loadedFrames[currentPoseIdx] || loadedFrames[0];
-
-        drawCoverImage(
-          ctx,
-          currentFrame,
-          width,
-          height,
-          baseScale,
-          panX,
-          panY,
-          tiltRad,
-          1
-        );
 
         const grad = ctx.createLinearGradient(0, height * 0.58, 0, height);
         grad.addColorStop(0, 'rgba(0,0,0,0)');

@@ -479,82 +479,41 @@ export default function StoryboardStudioView({
       }
 
       const framesList: string[] = [frame1];
+      let aiVideoDataUrl: string | null = null;
 
-      // CHIAMATA 2 (In parallelo < 7s): Genera 3 pose interattive (bocca aperta + gesto / bocca semi-aperta / reazione finale di gruppo)
+      // CHIAMATA 2 (Veloce ~8s): Converte il fotogramma Nano Banana Pro in un VERO VIDEO FLUIDO A 24 FPS (Image-to-Video AI)
       try {
         setShotProgressText(
-          'Passo 2/3: Animazione labiale, gesti e interazione tra gli attori...'
+          'Passo 2/3: Motore Image-to-Video sta generando il movimento fluido a 24fps dei personaggi...'
         );
-        const compressedFrame1 = await compressImageForApi(frame1, 768);
-        const [varResOpen, varResGesture, varResReaction] = await Promise.all([
-          fetch('/api/generate-shot-media', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              step: 'variant',
-              baseFrameBase64: compressedFrame1,
-              variantType: 'speaking_open',
-              speakerName: speaker?.name,
-              characterNames: orderedChars.map((c) => c.name),
-              visualPromptEn: shot.visualPromptEn,
-              aspectRatio,
-            }),
-          }).catch(() => null),
-          fetch('/api/generate-shot-media', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              step: 'variant',
-              baseFrameBase64: compressedFrame1,
-              variantType: 'speaking_gesture',
-              speakerName: speaker?.name,
-              characterNames: orderedChars.map((c) => c.name),
-              visualPromptEn: shot.visualPromptEn,
-              aspectRatio,
-            }),
-          }).catch(() => null),
-          fetch('/api/generate-shot-media', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              step: 'variant',
-              baseFrameBase64: compressedFrame1,
-              variantType: 'group_reaction',
-              speakerName: speaker?.name,
-              characterNames: orderedChars.map((c) => c.name),
-              visualPromptEn: shot.visualPromptEn,
-              aspectRatio,
-            }),
-          }).catch(() => null),
-        ]);
-
-        if (varResOpen && varResOpen.ok) {
-          const jsonOpen = await varResOpen.json();
-          if (jsonOpen.frameImageBase64) {
-            framesList.push(jsonOpen.frameImageBase64);
+        const compressedFrame1 = await compressImageForApi(frame1, 704);
+        const i2vRes = await fetch('/api/generate-i2v-video', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            frameImageBase64: compressedFrame1,
+            visualPromptEn: shot.visualPromptEn,
+            speakerName: speaker?.name,
+            characterNames: orderedChars.map((c) => c.name),
+            aspectRatio,
+          }),
+        });
+        if (i2vRes.ok) {
+          const i2vJson = await i2vRes.json();
+          if (i2vJson.videoDataUrl) {
+            aiVideoDataUrl = i2vJson.videoDataUrl;
           }
         }
-        if (varResGesture && varResGesture.ok) {
-          const jsonGesture = await varResGesture.json();
-          if (jsonGesture.frameImageBase64) {
-            framesList.push(jsonGesture.frameImageBase64);
-          }
-        }
-        if (varResReaction && varResReaction.ok) {
-          const jsonReaction = await varResReaction.json();
-          if (jsonReaction.frameImageBase64) {
-            framesList.push(jsonReaction.frameImageBase64);
-          }
-        }
-      } catch {
-        // Fallback sicuro
+      } catch (i2vErr) {
+        console.warn('Fallback da I2V 24fps:', i2vErr);
       }
 
-      setShotProgressText('Passo 3/3: Registrazione Video 10s (0%)...');
+      setShotProgressText('Passo 3/3: Sincronizzazione Video 24fps + Voce Italiana (0%)...');
 
       const clipDataUrl = await renderShotVideoDataUrl({
         frameImageBase64: frame1,
         framesBase64: framesList,
+        aiVideoDataUrl,
         audioWavBase64: mediaData.audioWavBase64,
         dialogueIta: shot.dialogueIta,
         speakerName: speaker?.name,
