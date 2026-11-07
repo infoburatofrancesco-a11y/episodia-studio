@@ -16,9 +16,8 @@ function parseDataUrl(dataUrl: string): { mimeType: string; base64Data: string }
 }
 
 const GEMINI_VISION_MODELS = [
-  'gemini-3.8-flash',
-  'gemini-3.5-flash',
   'gemini-2.5-flash',
+  'gemini-2.5-pro',
 ];
 
 export async function POST(req: NextRequest) {
@@ -135,7 +134,7 @@ Rules:
       const fallbackDescriptor =
         category === 'animal'
           ? `Expressive ${name || 'pet'} animal character, detailed natural fur texture, bright expressive eyes, distinct facial markings, high-definition studio lighting, consistent physical appearance across all camera angles (${imageParts.length} reference photos).`
-          : `Expressive ${name || 'adult'} human character, natural skin texture, warm expressive dark eyes, bright natural smile, casual indoor bathrobe/homewear, silver hoop earrings, natural hair tied back, realistic cinematic lighting (${imageParts.length} reference photos).`;
+          : `Expressive ${name || 'adult'} human character matching the exact face, hairstyle, eyes, smile, and clothing from the attached reference photos (${imageParts.length} reference photos).`;
 
       return NextResponse.json({
         visualDescriptor: fallbackDescriptor,

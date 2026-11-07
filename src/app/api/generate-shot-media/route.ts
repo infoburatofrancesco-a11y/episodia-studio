@@ -13,6 +13,7 @@ interface GenerateShotMediaBody {
     | 'speaking'
     | 'reaction'
     | 'speaking_open'
+    | 'speaking_mid'
     | 'speaking_gesture'
     | 'group_reaction';
   visualPromptEn: string;
@@ -22,6 +23,7 @@ interface GenerateShotMediaBody {
   speakerDescriptor?: string;
   speakerCategory?: 'human' | 'animal';
   characterNames?: string[];
+  photoLabels?: string[];
   aspectRatio?: '9:16' | '16:9';
   referenceImagesBase64?: string[];
   shotNumber?: number;
@@ -219,6 +221,7 @@ export async function POST(req: NextRequest) {
       speakerName,
       speakerDescriptor,
       characterNames = [],
+      photoLabels = [],
       aspectRatio = '9:16',
       referenceImagesBase64 = [],
     } = body;
@@ -233,8 +236,8 @@ export async function POST(req: NextRequest) {
     const targetSpeaker =
       speakerName || characterNames[0] || 'the main character';
 
-    // PASSO VARIANTE IN-PLACE: mantiene sfondo, vestiti e volti IDENTICI al 100% al Frame 0,
-    // animando bocca, espressioni e interazione tra gli attori!
+    // PASSO VARIANTE IN-PLACE PIXEL-LOCKED: mantiene sfondo, vestiti, spalle, mani e altri attori
+    // 100% ALLINEATI AL PIXEL col Frame 0, animando SOLO la bocca/mascella/sopracciglia di chi parla!
     if (step === 'variant' && baseFrameBase64) {
       const parsedBase = parseDataUrl(baseFrameBase64);
       if (!parsedBase) {
@@ -242,11 +245,9 @@ export async function POST(req: NextRequest) {
       }
       let variantPrompt = '';
       if (variantType === 'speaking_open' || variantType === 'speaking') {
-        variantPrompt = `IN-PLACE PHOTO EDIT (${orientationLabel}): Keep 100% of the exact same background, room, camera angle, lighting, clothing, hats/accessories, and exact facial identities from this image unchanged. ONLY animate ${targetSpeaker} speaking expressively: ${targetSpeaker}'s mouth is naturally open pronouncing a vowel ('Ah'/'Oh') with an active conversational hand gesture, while the other characters/animals in the shot look at ${targetSpeaker} and react with lively expressions. No text overlays.`;
-      } else if (variantType === 'speaking_gesture') {
-        variantPrompt = `IN-PLACE PHOTO EDIT (${orientationLabel}): Keep 100% of the exact same background, room, camera angle, lighting, clothing, hats/accessories, and exact facial identities from this image unchanged. ONLY animate ${targetSpeaker} mid-sentence: ${targetSpeaker}'s mouth is half-open speaking with a warm expressive smile, slight natural head tilt, and shifted hand position, while the other characters/animals in the shot interact naturally. No text overlays.`;
+        variantPrompt = `STRICT IN-PLACE PIXEL EDIT (${orientationLabel}): Keep 99% of this exact image (background room, furniture, lighting, all other people/animals, clothing, hair, head position, hands, and shoulders) 100% UNCHANGED and pixel-aligned. ONLY change ${targetSpeaker}'s mouth and jaw: ${targetSpeaker}'s mouth is naturally open mid-speech pronouncing the vowel "Ah" with lively expressive eyes as they talk to the camera. Do NOT move the camera, hands, shoulders, or background. No text overlays.`;
       } else {
-        variantPrompt = `IN-PLACE PHOTO EDIT (${orientationLabel}): Keep 100% of the exact same background, room, camera angle, lighting, clothing, hats/accessories, and exact facial identities from this image unchanged. Animate a joyful group reaction moment: all characters in the shot are smiling/laughing warmly and interacting together (clapping, petting the dog/pet if present, or sharing a comedic reaction), with mouths closed or smiling naturally. No text overlays.`;
+        variantPrompt = `STRICT IN-PLACE PIXEL EDIT (${orientationLabel}): Keep 99% of this exact image (background room, furniture, lighting, all other people/animals, clothing, hair, head position, hands, and shoulders) 100% UNCHANGED and pixel-aligned. ONLY change ${targetSpeaker}'s mouth and eyebrows: ${targetSpeaker}'s mouth is half-open in a natural conversational syllable ("Oh"/"Eh") with slightly raised expressive eyebrows and a warm smile as they talk to the camera. Do NOT move the camera, hands, shoulders, or background. No text overlays.`;
       }
 
       const variantFrame = await generateSingleNanoBananaFrame(
@@ -270,7 +271,7 @@ export async function POST(req: NextRequest) {
     }
 
     // PASSO BASE: invia fino a 4 foto reali di riferimento del Cast a Nano Banana Pro
-    // per preservare 1:1 i soggetti, i vestiti, gli accessori e gli animali domestici!
+    // con etichette esplicite per preservare al 100% (1:1) i volti e i vestiti reali delle foto di partenza!
     const refParts: Array<{ inlineData: { mimeType: string; data: string } }> =
       [];
     for (const refImg of referenceImagesBase64.slice(0, 4)) {
@@ -285,16 +286,22 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const castNamesList =
-      characterNames.length > 0
-        ? `Subjects from the attached reference photos to include together interacting in this shot: ${characterNames.join(', ')}. Active speaker: ${targetSpeaker}.`
-        : `Subject from the attached reference photo: ${targetSpeaker}.`;
+    const sanitizedVisualPrompt = (visualPromptEn || '')
+      .replace(/casual indoor bathrobe\/homewear/gi, 'exact outfit from their reference photo')
+      .replace(/\(\d+\s*reference photos?\)/gi, '');
 
-    const masterPrompt = `Using the exact subjects from these reference photos, create a realistic live-action photograph (${orientationLabel}) where the actors interact naturally with each other.
-- STRICT 1:1 IDENTITY & APPEARANCE LOCK: Preserve 100% of the exact real faces, facial features, hair/wigs, hats, glasses, clothing, and pets/animals directly from the attached reference photos. Do NOT replace them with generic models or alter their faces.
-- ${castNamesList}
-- Camera & Scene Action: ${cameraAngle || 'Medium shot'}. ${visualPromptEn}.
-- Keyframe 0 Pose: The actors are together in the scene interacting naturally; ${targetSpeaker} has a natural closed-mouth or gentle smile expression just before speaking. Photorealistic iPhone 16 Pro video frame, natural lighting, no text overlays, no watermarks.`;
+    const photoMappingDesc =
+      photoLabels.length > 0
+        ? `Attached Reference Photos Mapping: ${photoLabels.slice(0, refParts.length).join('; ')}.`
+        : characterNames.length > 0
+        ? `Subjects in the attached reference photos: ${characterNames.join(', ')}.`
+        : `Subject in the attached reference photo: ${targetSpeaker}.`;
+
+    const masterPrompt = `Using the EXACT real people/animals from the attached reference photos (${photoMappingDesc}), create a photorealistic ${orientationLabel} live-action frame.
+- CRITICAL 1:1 STARTING PHOTO LOCK: Copy 100% of the exact real facial features, eye shape and color, nose, smile, hair/ponytail/stubble, earrings/glasses/hats, and exact clothing directly from the attached reference photos. The characters MUST be immediately recognizable as the exact same individuals from the starting photos.
+- Characters in this shot: ${characterNames.join(', ') || targetSpeaker}. Active speaker: ${targetSpeaker}.
+- Framing & Scene Context: ${cameraAngle || 'Medium selfie shot'}. ${sanitizedVisualPrompt}.
+- Pose for Base Keyframe (Closed Mouth): The characters are facing the camera naturally; ${targetSpeaker} has a warm, natural CLOSED-MOUTH smile just before starting to speak (lips gently closed or softly smiling so we can animate their mouth opening smoothly). Real iPhone 16 Pro camera quality, no text overlays, no watermarks.`;
 
     const [frame1, audioWavBase64] = await Promise.all([
       generateSingleNanoBananaFrame(ai, refParts, masterPrompt, false),

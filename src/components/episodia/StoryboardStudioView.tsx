@@ -343,22 +343,27 @@ export default function StoryboardStudioView({
         : effectiveChars;
 
       const rawRefList: string[] = [];
+      const photoLabels: string[] = [];
       for (const c of orderedChars.slice(0, 3)) {
         const primaryPhoto =
           c.referenceImagesBase64?.[0] || c.referenceImageBase64;
-        if (primaryPhoto) rawRefList.push(primaryPhoto);
-        // Aggiungiamo anche una seconda angolazione del personaggio principale se disponibile
+        if (primaryPhoto && rawRefList.length < 4) {
+          rawRefList.push(primaryPhoto);
+          photoLabels.push(`Photo ${rawRefList.length} (${c.name})`);
+        }
+        // Aggiungiamo anche una seconda angolazione di ogni personaggio presente nello shot (fino a 4 foto totali)
         if (
-          c.id === speaker?.id &&
           c.referenceImagesBase64 &&
-          c.referenceImagesBase64.length > 1
+          c.referenceImagesBase64.length > 1 &&
+          rawRefList.length < 4
         ) {
           rawRefList.push(c.referenceImagesBase64[1]);
+          photoLabels.push(`Photo ${rawRefList.length} (${c.name} angle 2)`);
         }
       }
 
       const compressedRefs = await Promise.all(
-        rawRefList.slice(0, 3).map((img) => compressImageForApi(img, 768))
+        rawRefList.slice(0, 4).map((img) => compressImageForApi(img, 768))
       );
       const rawRefPhoto = rawRefList[0] || cast[0]?.referenceImageBase64;
 
@@ -444,6 +449,7 @@ export default function StoryboardStudioView({
           speakerDescriptor: speaker?.visualDescriptor,
           speakerCategory: speaker?.category || 'human',
           characterNames: orderedChars.map((c) => c.name),
+          photoLabels,
           aspectRatio,
           referenceImagesBase64: compressedRefs,
           shotNumber: shot.shotNumber,
@@ -479,41 +485,64 @@ export default function StoryboardStudioView({
       }
 
       const framesList: string[] = [frame1];
-      let aiVideoDataUrl: string | null = null;
 
-      // CHIAMATA 2 (Veloce ~8s): Converte il fotogramma Nano Banana Pro in un VERO VIDEO FLUIDO A 24 FPS (Image-to-Video AI)
+      // CHIAMATA 2 (Veloce ~5s in parallelo): Genera 2 visemi labiali in-place allineati al pixel
+      // (bocca aperta "Ah" + bocca semi-aperta "Oh/Eh") mantenendo volto e sfondo 100% identici alla foto!
       try {
         setShotProgressText(
-          'Passo 2/3: Motore Image-to-Video sta generando il movimento fluido a 24fps dei personaggi...'
+          'Passo 2/3: Generazione visemi labiali sincronizzati (100% fedeli alla foto)...'
         );
-        const compressedFrame1 = await compressImageForApi(frame1, 704);
-        const i2vRes = await fetch('/api/generate-i2v-video', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            frameImageBase64: compressedFrame1,
-            visualPromptEn: shot.visualPromptEn,
-            speakerName: speaker?.name,
-            characterNames: orderedChars.map((c) => c.name),
-            aspectRatio,
-          }),
-        });
-        if (i2vRes.ok) {
-          const i2vJson = await i2vRes.json();
-          if (i2vJson.videoDataUrl) {
-            aiVideoDataUrl = i2vJson.videoDataUrl;
+        const compressedBase = await compressImageForApi(frame1, 768);
+        const [openRes, midRes] = await Promise.all([
+          fetch('/api/generate-shot-media', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              step: 'variant',
+              variantType: 'speaking_open',
+              baseFrameBase64: compressedBase,
+              visualPromptEn: shot.visualPromptEn,
+              speakerName: speaker?.name,
+              characterNames: orderedChars.map((c) => c.name),
+              aspectRatio,
+            }),
+          }).catch(() => null),
+          fetch('/api/generate-shot-media', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              step: 'variant',
+              variantType: 'speaking_mid',
+              baseFrameBase64: compressedBase,
+              visualPromptEn: shot.visualPromptEn,
+              speakerName: speaker?.name,
+              characterNames: orderedChars.map((c) => c.name),
+              aspectRatio,
+            }),
+          }).catch(() => null),
+        ]);
+
+        if (openRes && openRes.ok) {
+          const openJson = await openRes.json().catch(() => ({}));
+          if (openJson.frameImageBase64) {
+            framesList.push(openJson.frameImageBase64);
           }
         }
-      } catch (i2vErr) {
-        console.warn('Fallback da I2V 24fps:', i2vErr);
+        if (midRes && midRes.ok) {
+          const midJson = await midRes.json().catch(() => ({}));
+          if (midJson.frameImageBase64) {
+            framesList.push(midJson.frameImageBase64);
+          }
+        }
+      } catch (varErr) {
+        console.warn('Fallback da visemi labiali:', varErr);
       }
 
-      setShotProgressText('Passo 3/3: Sincronizzazione Video 24fps + Voce Italiana (0%)...');
+      setShotProgressText('Passo 3/3: Sincronizzazione Lip-Sync 30fps + Voce Italiana (0%)...');
 
       const clipDataUrl = await renderShotVideoDataUrl({
         frameImageBase64: frame1,
         framesBase64: framesList,
-        aiVideoDataUrl,
         audioWavBase64: mediaData.audioWavBase64,
         dialogueIta: shot.dialogueIta,
         speakerName: speaker?.name,
@@ -522,7 +551,7 @@ export default function StoryboardStudioView({
         aspectRatio,
         compactForCloud: false,
         onProgress: (pct) => {
-          setShotProgressText(`Passo 3/3: Registrazione Video 10s (${pct}%)...`);
+          setShotProgressText(`Passo 3/3: Registrazione Lip-Sync 10s (${pct}%)...`);
         },
       });
 
