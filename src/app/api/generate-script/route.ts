@@ -57,9 +57,14 @@ const scriptResponseSchema: Schema = {
   description: 'Ordered sequence of 5-second shots composing the episode.',
 };
 
+export const runtime = 'edge';
+export const maxDuration = 60;
+
 const GEMINI_SCRIPT_MODELS = [
-  'gemini-2.5-flash',
-  'gemini-2.5-pro',
+  'gemini-3-flash-preview',
+  'gemini-3.1-pro-preview',
+  'gemini-3.8-flash',
+  'gemini-3.5-flash',
 ];
 
 function buildFallbackShots(

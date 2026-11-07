@@ -15,9 +15,14 @@ function parseDataUrl(dataUrl: string): { mimeType: string; base64Data: string }
   };
 }
 
+export const runtime = 'edge';
+export const maxDuration = 60;
+
 const GEMINI_VISION_MODELS = [
-  'gemini-2.5-flash',
-  'gemini-2.5-pro',
+  'gemini-3-flash-preview',
+  'gemini-3.1-pro-preview',
+  'gemini-3.8-flash',
+  'gemini-3.5-flash',
 ];
 
 export async function POST(req: NextRequest) {
