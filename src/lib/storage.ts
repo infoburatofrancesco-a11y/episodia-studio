@@ -10,7 +10,7 @@ import type {
 export const CAST_STORAGE_KEY = 'episodia_cast';
 export const SERIES_STORAGE_KEY = 'episodia_series';
 export const EPISODES_STORAGE_KEY = 'episodia_episodes';
-export const LOCAL_MEDIA_STORAGE_KEY = 'episodia_local_media_v7_lipsync30fps';
+export const LOCAL_MEDIA_STORAGE_KEY = 'episodia_local_media_v8_realvideo';
 export const CLOUD_CONFIG_STORAGE_KEY = 'episodia_cloud_config';
 
 // ============================================================================
@@ -184,6 +184,7 @@ export async function getLocalGeneratedMediaMap(): Promise<
     // Rimuove automaticamente la vecchia cache con le clip da 4-5s o non sincronizzate
     del('episodia_local_media').catch(() => {});
     del('episodia_local_media_v6_i2v24fps').catch(() => {});
+    del('episodia_local_media_v7_lipsync30fps').catch(() => {});
     const map = await get<Record<string, string>>(LOCAL_MEDIA_STORAGE_KEY);
     if (!map || typeof map !== 'object') return {};
     const cleaned: Record<string, string> = {};

@@ -485,15 +485,28 @@ export default function StoryboardStudioView({
       }
 
       const framesList: string[] = [frame1];
+      let aiVideoDataUrl: string | null = null;
 
-      // CHIAMATA 2 (Veloce ~5s in parallelo): Genera 2 visemi labiali in-place allineati al pixel
-      // (bocca aperta "Ah" + bocca semi-aperta "Oh/Eh") mantenendo volto e sfondo 100% identici alla foto!
+      // CHIAMATA 2 (In parallelo): Genera il VERO VIDEO ANIMATO Image-to-Video (con volto bloccato 1:1 e velocità reale)
+      // + i visemi labiali in-place per una sincronizzazione perfetta con la voce italiana!
       try {
         setShotProgressText(
-          'Passo 2/3: Generazione visemi labiali sincronizzati (100% fedeli alla foto)...'
+          'Passo 2/3: Motore Image-to-Video sta generando il VERO video animato dei personaggi...'
         );
-        const compressedBase = await compressImageForApi(frame1, 768);
-        const [openRes, midRes] = await Promise.all([
+        const compressedBase = await compressImageForApi(frame1, 704);
+        const [i2vRes, openRes, midRes] = await Promise.all([
+          fetch('/api/generate-i2v-video', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              frameImageBase64: compressedBase,
+              visualPromptEn: shot.visualPromptEn,
+              dialogueIta: shot.dialogueIta,
+              speakerName: speaker?.name,
+              characterNames: orderedChars.map((c) => c.name),
+              aspectRatio,
+            }),
+          }).catch(() => null),
           fetch('/api/generate-shot-media', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -522,6 +535,12 @@ export default function StoryboardStudioView({
           }).catch(() => null),
         ]);
 
+        if (i2vRes && i2vRes.ok) {
+          const i2vJson = await i2vRes.json().catch(() => ({}));
+          if (i2vJson.videoDataUrl) {
+            aiVideoDataUrl = i2vJson.videoDataUrl;
+          }
+        }
         if (openRes && openRes.ok) {
           const openJson = await openRes.json().catch(() => ({}));
           if (openJson.frameImageBase64) {
@@ -535,14 +554,15 @@ export default function StoryboardStudioView({
           }
         }
       } catch (varErr) {
-        console.warn('Fallback da visemi labiali:', varErr);
+        console.warn('Fallback da I2V / visemi:', varErr);
       }
 
-      setShotProgressText('Passo 3/3: Sincronizzazione Lip-Sync 30fps + Voce Italiana (0%)...');
+      setShotProgressText('Passo 3/3: Sincronizzazione Video Animato + Voce Italiana (0%)...');
 
       const clipDataUrl = await renderShotVideoDataUrl({
         frameImageBase64: frame1,
         framesBase64: framesList,
+        aiVideoDataUrl,
         audioWavBase64: mediaData.audioWavBase64,
         dialogueIta: shot.dialogueIta,
         speakerName: speaker?.name,
@@ -551,7 +571,7 @@ export default function StoryboardStudioView({
         aspectRatio,
         compactForCloud: false,
         onProgress: (pct) => {
-          setShotProgressText(`Passo 3/3: Registrazione Lip-Sync 10s (${pct}%)...`);
+          setShotProgressText(`Passo 3/3: Registrazione Video Animato 10s (${pct}%)...`);
         },
       });
 

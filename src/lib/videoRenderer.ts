@@ -728,24 +728,48 @@ export async function renderShotVideoDataUrl(
         ctx.fillRect(0, 0, width, height);
 
         if (aiVideoEl && aiVideoEl.videoWidth > 0) {
-          if (aiVideoEl.paused) {
-            aiVideoEl.play().catch(() => {});
+          // Sincronizzazione diretta del VERO video animato AI con la voce italiana e velocità reale 1.15x (mai lento!)
+          if (isWithinSpeechWindow) {
+            if (isSpeakingNow) {
+              aiVideoEl.playbackRate = 1.15 + smoothVoiceEnergy * 0.18;
+              if (aiVideoEl.paused) {
+                aiVideoEl.play().catch(() => {});
+              }
+            } else {
+              // Pausa tra le parole: rallenta il movimento labiale per seguire il respiro
+              aiVideoEl.playbackRate = 0.25;
+            }
+            drawCoverVideo(ctx, aiVideoEl, width, height);
+          } else {
+            // La battuta vocale è terminata: ferma il parlato e sfuma dolcemente sulla posa sorridente a bocca chiusa
+            if (!aiVideoEl.paused) {
+              aiVideoEl.pause();
+            }
+            drawCoverVideo(ctx, aiVideoEl, width, height);
+            const postSpeechFade = Math.min(
+              1,
+              Math.max(0, (elapsed - audioDurationMs) / 450)
+            );
+            if (postSpeechFade > 0.02) {
+              drawCoverImage(
+                ctx,
+                loadedFrames[0],
+                width,
+                height,
+                1.01,
+                0,
+                0,
+                0,
+                postSpeechFade
+              );
+            }
           }
-          drawCoverVideo(ctx, aiVideoEl, width, height);
         } else {
-          // Movimento naturale real-time 1.0x a 30fps sincronizzato con il parlato
-          const baseScale =
-            1.02 +
-            Math.sin(progress * Math.PI) * 0.022 +
-            smoothVoiceEnergy * 0.006;
-          const panX = Math.sin(elapsed * 0.0018) * (width * 0.008);
-          const panY =
-            Math.sin(elapsed * 0.0025) * (height * 0.003) +
-            Math.sin(elapsed * 0.022) *
-              (height * 0.0035 * smoothVoiceEnergy);
-          const tiltRad =
-            Math.sin(elapsed * 0.0015) * 0.002 +
-            Math.sin(elapsed * 0.016) * (0.0025 * smoothVoiceEnergy);
+          // Nessuna vibrazione ad alta frequenza: solo movimento cinematografico lento e fluido
+          const baseScale = 1.01 + progress * 0.025;
+          const panX = Math.sin(progress * Math.PI) * (width * 0.008);
+          const panY = 0;
+          const tiltRad = 0;
 
           // 1. Disegna il fotogramma base (bocca chiusa, 100% fedele alla foto di partenza)
           drawCoverImage(
@@ -760,7 +784,20 @@ export async function renderShotVideoDataUrl(
             1
           );
 
-          // 2. Sovrappone in modo fluido a 30fps la patch sfumata del visema semi-aperto (sillabe medie)
+          // 2. Sovrappone in modo fluido a 30fps il fotogramma/patch visema semi-aperto (sillabe medie)
+          if (loadedFrames.length > 2 && smoothMid > 0.015) {
+            drawCoverImage(
+              ctx,
+              loadedFrames[2],
+              width,
+              height,
+              baseScale,
+              panX,
+              panY,
+              tiltRad,
+              Math.min(1, smoothMid * 0.85)
+            );
+          }
           if (patchMidCanvas && smoothMid > 0.015) {
             drawCoverSource(
               ctx,
@@ -777,7 +814,20 @@ export async function renderShotVideoDataUrl(
             );
           }
 
-          // 3. Sovrappone in modo fluido a 30fps la patch sfumata del visema bocca aperta (vocali "Ah"/"Oh")
+          // 3. Sovrappone in modo fluido a 30fps il fotogramma/patch visema bocca aperta (vocali "Ah"/"Oh")
+          if (loadedFrames.length > 1 && smoothOpen > 0.015) {
+            drawCoverImage(
+              ctx,
+              loadedFrames[1],
+              width,
+              height,
+              baseScale,
+              panX,
+              panY,
+              tiltRad,
+              Math.min(1, smoothOpen * 0.85)
+            );
+          }
           if (patchOpenCanvas && smoothOpen > 0.015) {
             drawCoverSource(
               ctx,

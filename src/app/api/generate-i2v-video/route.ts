@@ -3,11 +3,10 @@ import { NextRequest, NextResponse } from 'next/server';
 export const runtime = 'edge';
 export const maxDuration = 60;
 
-const LTX_SPACE_BASE = 'https://lightricks-ltx-video-distilled.hf.space';
-
 interface I2VRequestBody {
   frameImageBase64: string;
   visualPromptEn?: string;
+  dialogueIta?: string;
   speakerName?: string;
   characterNames?: string[];
   aspectRatio?: '9:16' | '16:9';
@@ -43,6 +42,84 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+async function uploadImageToGradioSpace(
+  spaceBase: string,
+  imgBytes: Uint8Array,
+  mimeType: string
+): Promise<string | null> {
+  try {
+    const formData = new FormData();
+    formData.append(
+      'files',
+      new Blob([imgBytes.buffer as ArrayBuffer], { type: mimeType }),
+      'frame.jpg'
+    );
+    const uploadRes = await fetch(`${spaceBase}/gradio_api/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!uploadRes.ok) return null;
+    const uploadJson = (await uploadRes.json()) as string[];
+    return uploadJson?.[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+async function runGradioSpaceI2V(
+  spaceBase: string,
+  endpointName: string,
+  dataPayload: unknown[]
+): Promise<string | null> {
+  try {
+    const startRes = await fetch(
+      `${spaceBase}/gradio_api/call/${endpointName}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: dataPayload }),
+      }
+    );
+    if (!startRes.ok) return null;
+
+    const startJson = (await startRes.json()) as { event_id?: string };
+    if (!startJson.event_id) return null;
+
+    const sseRes = await fetch(
+      `${spaceBase}/gradio_api/call/${endpointName}/${startJson.event_id}`
+    );
+    if (!sseRes.ok) return null;
+
+    const sseText = await sseRes.text();
+    const dataMatch = sseText.match(
+      /event:\s*complete[\s\S]*?data:\s*(\[[\s\S]*?\])\r?\n/
+    );
+    if (!dataMatch) return null;
+
+    const parsedData = JSON.parse(dataMatch[1]);
+    const firstItem = parsedData?.[0];
+    const videoObj = firstItem?.video || firstItem;
+    const videoUrl: string | undefined =
+      videoObj?.url ||
+      (videoObj?.path
+        ? `${spaceBase}/gradio_api/file=${videoObj.path}`
+        : undefined);
+
+    if (!videoUrl) return null;
+
+    const mp4Res = await fetch(videoUrl);
+    if (!mp4Res.ok) return null;
+
+    const mp4Buf = await mp4Res.arrayBuffer();
+    if (mp4Buf.byteLength < 5000) return null;
+
+    const mp4Base64 = uint8ArrayToBase64(new Uint8Array(mp4Buf));
+    return `data:video/mp4;base64,${mp4Base64}`;
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as I2VRequestBody;
@@ -63,132 +140,184 @@ export async function POST(req: NextRequest) {
     }
 
     const imgBytes = base64ToUint8Array(parsed.data);
-    const formData = new FormData();
-    formData.append(
-      'files',
-      new Blob([imgBytes.buffer as ArrayBuffer], { type: parsed.mimeType }),
-      'frame.jpg'
-    );
-
-    const uploadRes = await fetch(`${LTX_SPACE_BASE}/gradio_api/upload`, {
-      method: 'POST',
-      body: formData,
-    });
-
-    if (!uploadRes.ok) {
-      return NextResponse.json(
-        { error: `Upload I2V non riuscito (${uploadRes.status})` },
-        { status: 502 }
-      );
-    }
-
-    const uploadJson = (await uploadRes.json()) as string[];
-    const uploadedFilePath = uploadJson?.[0];
-    if (!uploadedFilePath) {
-      return NextResponse.json(
-        { error: 'Percorso file I2V mancante.' },
-        { status: 502 }
-      );
-    }
-
     const heightUi = aspectRatio === '9:16' ? 704 : 512;
     const widthUi = aspectRatio === '9:16' ? 512 : 704;
 
+    const cleanContext = visualPromptEn
+      .replace(/casual indoor bathrobe\/homewear/gi, '')
+      .slice(0, 220);
+
     const motionPrompt = `${
       characterNames.length > 1
-        ? `The people (${characterNames.join(', ')}) in the image interact naturally with each other; ${speakerName} speaks expressively to the camera with fluid mouth movement, natural head nods, and lively hand gestures.`
-        : `${speakerName} in the image speaks expressively to the camera with fluid mouth movement, natural head nods, blinking eyes, and lively hand gestures.`
-    } ${visualPromptEn}. Photorealistic, smooth 24fps live-action video motion.`;
+        ? `Real-time normal speed live-action video: the exact people (${characterNames.join(', ')}) from the image interact naturally together; ${speakerName} speaks expressively to the camera with natural mouth movement, lively hand gestures, and warm facial expressions while the others react and smile.`
+        : `Real-time normal speed live-action video: ${speakerName} from the image speaks expressively to the camera with natural mouth movement, head nods, blinking eyes, and lively hand gestures.`
+    } Keep the exact facial features, hair, and clothing from the starting image unchanged. ${cleanContext}`;
 
-    const startRes = await fetch(
-      `${LTX_SPACE_BASE}/gradio_api/call/image_to_video`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          data: [
-            motionPrompt,
-            'worst quality, inconsistent motion, blurry, jittery, distorted, static, morphing face',
-            {
-              path: uploadedFilePath,
-              orig_name: 'frame.jpg',
-              mime_type: parsed.mimeType,
-              meta: { _type: 'gradio.FileData' },
-            },
-            null,
-            heightUi,
-            widthUi,
-            'image-to-video',
-            6,
-            9,
-            42,
-            true,
-            1,
-            true,
-          ],
-        }),
+    const negativePrompt =
+      'slow motion, slow-mo, worst quality, inconsistent motion, blurry, jittery, distorted, morphing face, deformed face, static photo';
+
+    // MOTORE 1: DeepRat LTX-Video ZeroGPU Optimized (single-pass improve_texture=false per preservare il volto 1:1 e velocità reale slow_motion=false)
+    {
+      const base = 'https://deeprat-ltx-video-zerogpu-optimized.hf.space';
+      const uploadedPath = await uploadImageToGradioSpace(
+        base,
+        imgBytes,
+        parsed.mimeType
+      );
+      if (uploadedPath) {
+        const videoDataUrl = await runGradioSpaceI2V(base, 'image_to_video', [
+          motionPrompt,
+          negativePrompt,
+          {
+            path: uploadedPath,
+            orig_name: 'frame.jpg',
+            mime_type: parsed.mimeType,
+            meta: { _type: 'gradio.FileData' },
+          },
+          null,
+          heightUi,
+          widthUi,
+          'image-to-video',
+          4.0,
+          9,
+          42,
+          true,
+          1.0,
+          false, // improve_texture_flag = false -> NON altera il volto della foto di partenza e usa metà quota GPU!
+          false, // slow_motion_flag = false -> Velocità reale 1.0x!
+        ]);
+        if (videoDataUrl) {
+          return NextResponse.json({
+            ok: true,
+            videoDataUrl,
+            engine: 'ltx-deeprat-realtime',
+          });
+        }
       }
+    }
+
+    // MOTORE 2: Upsampler LTX 2.3 22B Distilled (ImageConditioningInput strength=1.0, zero rumore sul volto)
+    {
+      const base = 'https://upsampler-ltx-video.hf.space';
+      const uploadedPath = await uploadImageToGradioSpace(
+        base,
+        imgBytes,
+        parsed.mimeType
+      );
+      if (uploadedPath) {
+        const h23 = aspectRatio === '9:16' ? 768 : 512;
+        const w23 = aspectRatio === '9:16' ? 512 : 768;
+        const videoDataUrl = await runGradioSpaceI2V(base, 'generate_video', [
+          {
+            path: uploadedPath,
+            orig_name: 'frame.jpg',
+            mime_type: parsed.mimeType,
+            meta: { _type: 'gradio.FileData' },
+          },
+          motionPrompt,
+          3.5,
+          false,
+          42,
+          true,
+          h23,
+          w23,
+        ]);
+        if (videoDataUrl) {
+          return NextResponse.json({
+            ok: true,
+            videoDataUrl,
+            engine: 'ltx-2.3-distilled',
+          });
+        }
+      }
+    }
+
+    // MOTORE 3: Lightricks LTX-Video Distilled (single-pass improve_texture=false per preservare il volto 1:1)
+    {
+      const base = 'https://lightricks-ltx-video-distilled.hf.space';
+      const uploadedPath = await uploadImageToGradioSpace(
+        base,
+        imgBytes,
+        parsed.mimeType
+      );
+      if (uploadedPath) {
+        const videoDataUrl = await runGradioSpaceI2V(base, 'image_to_video', [
+          motionPrompt,
+          negativePrompt,
+          {
+            path: uploadedPath,
+            orig_name: 'frame.jpg',
+            mime_type: parsed.mimeType,
+            meta: { _type: 'gradio.FileData' },
+          },
+          null,
+          heightUi,
+          widthUi,
+          'image-to-video',
+          4.0,
+          9,
+          42,
+          true,
+          1.0,
+          false, // improve_texture_flag = false -> preserva il volto 1:1!
+        ]);
+        if (videoDataUrl) {
+          return NextResponse.json({
+            ok: true,
+            videoDataUrl,
+            engine: 'ltx-lightricks-singlepass',
+          });
+        }
+      }
+    }
+
+    // MOTORE 4: Wan 2.2 I2V Lightning 4-Step
+    {
+      const base = 'https://saravutw-wan2-2-i2v-lightning-4-8step-custom.hf.space';
+      const uploadedPath = await uploadImageToGradioSpace(
+        base,
+        imgBytes,
+        parsed.mimeType
+      );
+      if (uploadedPath) {
+        const fileObj = {
+          path: uploadedPath,
+          orig_name: 'frame.jpg',
+          mime_type: parsed.mimeType,
+          meta: { _type: 'gradio.FileData' },
+        };
+        const videoDataUrl = await runGradioSpaceI2V(base, 'generate_video', [
+          fileObj,
+          null,
+          motionPrompt,
+          4,
+          negativePrompt,
+          3.5,
+          1,
+          1,
+          42,
+          true,
+          5,
+          'UniPCMultistep',
+          3,
+          '16',
+          false,
+          true,
+        ]);
+        if (videoDataUrl) {
+          return NextResponse.json({
+            ok: true,
+            videoDataUrl,
+            engine: 'wan-2.2-lightning',
+          });
+        }
+      }
+    }
+
+    return NextResponse.json(
+      { error: 'Tutti i motori Image-to-Video sono momentaneamente occupati.' },
+      { status: 502 }
     );
-
-    if (!startRes.ok) {
-      return NextResponse.json(
-        { error: `Avvio I2V non riuscito (${startRes.status})` },
-        { status: 502 }
-      );
-    }
-
-    const startJson = (await startRes.json()) as { event_id?: string };
-    if (!startJson.event_id) {
-      return NextResponse.json(
-        { error: 'Nessun event_id restituito da I2V.' },
-        { status: 502 }
-      );
-    }
-
-    const sseRes = await fetch(
-      `${LTX_SPACE_BASE}/gradio_api/call/image_to_video/${startJson.event_id}`
-    );
-    const sseText = await sseRes.text();
-
-    // Estraiamo l'URL del file MP4 dall'evento SSE "event: complete\ndata: [...]"
-    const dataMatch = sseText.match(/event:\s*complete[\s\S]*?data:\s*(\[[\s\S]*?\])\r?\n/);
-    if (!dataMatch) {
-      return NextResponse.json(
-        { error: 'Generazione I2V non completata.' },
-        { status: 502 }
-      );
-    }
-
-    const parsedData = JSON.parse(dataMatch[1]);
-    const videoObj = parsedData?.[0]?.video;
-    const videoUrl: string | undefined =
-      videoObj?.url ||
-      (videoObj?.path
-        ? `${LTX_SPACE_BASE}/gradio_api/file=${videoObj.path}`
-        : undefined);
-
-    if (!videoUrl) {
-      return NextResponse.json(
-        { error: 'URL video MP4 non trovato nella risposta I2V.' },
-        { status: 502 }
-      );
-    }
-
-    const mp4Res = await fetch(videoUrl);
-    if (!mp4Res.ok) {
-      return NextResponse.json(
-        { error: 'Download MP4 I2V non riuscito.' },
-        { status: 502 }
-      );
-    }
-
-    const mp4Buf = await mp4Res.arrayBuffer();
-    const mp4Base64 = uint8ArrayToBase64(new Uint8Array(mp4Buf));
-
-    return NextResponse.json({
-      ok: true,
-      videoDataUrl: `data:video/mp4;base64,${mp4Base64}`,
-    });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: msg }, { status: 500 });
