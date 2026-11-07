@@ -1,6 +1,7 @@
 export interface RenderShotVideoParams {
   frameImageBase64: string;
   framesBase64?: string[];
+  isGrid2x2?: boolean;
   aiVideoDataUrl?: string | null;
   audioWavBase64?: string | null;
   dialogueIta?: string;
@@ -308,17 +309,83 @@ function drawCoverImage(
 }
 
 /**
- * Confronta il fotogramma base (bocca chiusa) e il fotogramma variante (bocca aperta/semi-aperta),
- * individua automaticamente il baricentro esatto (cx, cy) della bocca/volto di chi parla,
- * e restituisce una patch sfumata (feathered mask) solo sul volto/bocca dell'attore che parla.
- * Così il resto della stanza, i vestiti e gli altri personaggi restano 100% immobili senza mai scattare!
+ * Taglia una Griglia 2x2 (4 pannelli sequenziali: Top-Left, Top-Right, Bottom-Left, Bottom-Right)
+ * in 4 Canvas a piena risoluzione (width x height), ritagliando un margine interno del 2%
+ * per eliminare qualsiasi eventuale linea di giunzione tra i quadranti.
  */
-function buildFeatheredFacePatch(
-  baseImg: HTMLImageElement,
-  variantImg: HTMLImageElement,
+function sliceGrid2x2IntoQuadrants(
+  gridImg: HTMLImageElement,
+  width: number,
+  height: number,
+  isGrid = true
+): HTMLCanvasElement[] {
+  if (!isGrid) {
+    const singleCanvas = document.createElement('canvas');
+    singleCanvas.width = width;
+    singleCanvas.height = height;
+    const sCtx = singleCanvas.getContext('2d');
+    if (sCtx) {
+      drawCoverImage(sCtx, gridImg, width, height, 1, 0, 0, 0, 1);
+    }
+    return [singleCanvas, singleCanvas, singleCanvas, singleCanvas];
+  }
+
+  const halfW = gridImg.width / 2;
+  const halfH = gridImg.height / 2;
+  const padX = Math.round(halfW * 0.02);
+  const padY = Math.round(halfH * 0.02);
+  const cropW = Math.max(16, halfW - padX * 2);
+  const cropH = Math.max(16, halfH - padY * 2);
+
+  const coords = [
+    { sx: padX, sy: padY }, // Beat 0: Top-Left
+    { sx: halfW + padX, sy: padY }, // Beat 1: Top-Right
+    { sx: padX, sy: halfH + padY }, // Beat 2: Bottom-Left
+    { sx: halfW + padX, sy: halfH + padY }, // Beat 3: Bottom-Right
+  ];
+
+  return coords.map(({ sx, sy }) => {
+    const qCanvas = document.createElement('canvas');
+    qCanvas.width = width;
+    qCanvas.height = height;
+    const qCtx = qCanvas.getContext('2d');
+    if (!qCtx) return qCanvas;
+
+    const srcRatio = cropW / cropH;
+    const dstRatio = width / height;
+    let drawW = width;
+    let drawH = height;
+    if (srcRatio > dstRatio) {
+      drawH = height;
+      drawW = height * srcRatio;
+    } else {
+      drawW = width;
+      drawH = width / srcRatio;
+    }
+    const dx = (width - drawW) / 2;
+    const dy = (height - drawH) / 2;
+    qCtx.drawImage(gridImg, sx, sy, cropW, cropH, dx, dy, drawW, drawH);
+    return qCanvas;
+  });
+}
+
+interface AlignedMouthPatchResult {
+  patchCanvas: HTMLCanvasElement;
+  normCx: number;
+  normCy: number;
+}
+
+/**
+ * Confronta il quadrante base (bocca chiusa) e il quadrante variante (bocca aperta/semi-aperta),
+ * cerca il centro esatto della bocca SOLO nella zona volto (evitando le mani nella metà inferiore),
+ * allinea automaticamente al pixel il volto (dx, dy) e crea una maschera ellittica sfumata sulla bocca/mascella.
+ */
+function buildAlignedMouthPatch(
+  baseQuad: HTMLCanvasElement,
+  variantQuad: HTMLCanvasElement,
   width: number,
   height: number
-): HTMLCanvasElement {
+): AlignedMouthPatchResult {
   const gridW = 180;
   const gridH = Math.round((height / width) * gridW);
 
@@ -333,11 +400,13 @@ function buildFeatheredFacePatch(
   const ctx1 = c1.getContext('2d');
 
   let normCx = 0.5;
-  let normCy = 0.44;
+  let normCy = 0.36;
+  let bestDx = 0;
+  let bestDy = 0;
 
   if (ctx0 && ctx1) {
-    drawCoverImage(ctx0, baseImg, gridW, gridH, 1, 0, 0, 0, 1);
-    drawCoverImage(ctx1, variantImg, gridW, gridH, 1, 0, 0, 0, 1);
+    ctx0.drawImage(baseQuad, 0, 0, gridW, gridH);
+    ctx1.drawImage(variantQuad, 0, 0, gridW, gridH);
 
     const d0 = ctx0.getImageData(0, 0, gridW, gridH).data;
     const d1 = ctx1.getImageData(0, 0, gridW, gridH).data;
@@ -346,10 +415,12 @@ function buildFeatheredFacePatch(
     let weightedY = 0;
     let totalWeight = 0;
 
-    const minY = Math.floor(gridH * 0.14);
-    const maxY = Math.floor(gridH * 0.78);
-    const minX = Math.floor(gridW * 0.08);
-    const maxX = Math.floor(gridW * 0.92);
+    // Cerchiamo la bocca SOLO nella fascia volto (18% - 54% verticale) così eventuali movimenti
+    // delle mani nella parte bassa non spostano mai la maschera labiale verso il petto!
+    const minY = Math.floor(gridH * 0.18);
+    const maxY = Math.floor(gridH * 0.54);
+    const minX = Math.floor(gridW * 0.12);
+    const maxX = Math.floor(gridW * 0.88);
 
     for (let y = minY; y < maxY; y++) {
       for (let x = minX; x < maxX; x++) {
@@ -358,8 +429,8 @@ function buildFeatheredFacePatch(
           Math.abs(d1[idx] - d0[idx]) +
           Math.abs(d1[idx + 1] - d0[idx + 1]) +
           Math.abs(d1[idx + 2] - d0[idx + 2]);
-        if (diff > 42) {
-          const w = (diff - 42) * (diff - 42);
+        if (diff > 36) {
+          const w = (diff - 36) * (diff - 36);
           weightedX += x * w;
           weightedY += y * w;
           totalWeight += w;
@@ -367,9 +438,39 @@ function buildFeatheredFacePatch(
       }
     }
 
-    if (totalWeight > 500) {
-      normCx = Math.min(0.85, Math.max(0.15, weightedX / totalWeight / gridW));
-      normCy = Math.min(0.75, Math.max(0.2, weightedY / totalWeight / gridH));
+    if (totalWeight > 350) {
+      normCx = Math.min(0.82, Math.max(0.18, weightedX / totalWeight / gridW));
+      normCy = Math.min(0.52, Math.max(0.22, weightedY / totalWeight / gridH));
+    }
+
+    // Allineamento automatico (dx, dy) sulla zona occhi/naso sopra la bocca per eliminare qualsiasi micro-shift della testa
+    const anchorX0 = Math.max(8, Math.floor((normCx - 0.1) * gridW));
+    const anchorX1 = Math.min(gridW - 8, Math.floor((normCx + 0.1) * gridW));
+    const anchorY0 = Math.max(8, Math.floor((normCy - 0.12) * gridH));
+    const anchorY1 = Math.min(gridH - 8, Math.floor((normCy - 0.03) * gridH));
+
+    let minAnchorErr = Number.POSITIVE_INFINITY;
+    for (let dy = -4; dy <= 4; dy++) {
+      for (let dx = -4; dx <= 4; dx++) {
+        let err = 0;
+        for (let y = anchorY0; y < anchorY1; y += 2) {
+          for (let x = anchorX0; x < anchorX1; x += 2) {
+            const i0 = (y * gridW + x) * 4;
+            const i1 = ((y + dy) * gridW + (x + dx)) * 4;
+            err +=
+              Math.abs(d0[i0] - d1[i1]) +
+              Math.abs(d0[i0 + 1] - d1[i1 + 1]) +
+              Math.abs(d0[i0 + 2] - d1[i1 + 2]);
+          }
+        }
+        // Leggera preferenza per shift (0,0) a parità di errore
+        const penalty = (Math.abs(dx) + Math.abs(dy)) * 18;
+        if (err + penalty < minAnchorErr) {
+          minAnchorErr = err + penalty;
+          bestDx = dx;
+          bestDy = dy;
+        }
+      }
     }
   }
 
@@ -377,27 +478,71 @@ function buildFeatheredFacePatch(
   patchCanvas.width = width;
   patchCanvas.height = height;
   const pCtx = patchCanvas.getContext('2d');
-  if (!pCtx) return patchCanvas;
+  if (!pCtx) return { patchCanvas, normCx, normCy };
 
-  drawCoverImage(pCtx, variantImg, width, height, 1, 0, 0, 0, 1);
+  const shiftPxX = -bestDx * (width / gridW);
+  const shiftPxY = -bestDy * (height / gridH);
+  pCtx.drawImage(variantQuad, shiftPxX, shiftPxY, width, height);
 
   const cx = normCx * width;
   const cy = normCy * height;
-  const maxDim = Math.max(width, height);
-  const innerR = maxDim * 0.11;
-  const outerR = maxDim * 0.27;
+  const rx = width * 0.16;
+  const ry = height * 0.095;
 
   pCtx.save();
   pCtx.globalCompositeOperation = 'destination-in';
-  const radGrad = pCtx.createRadialGradient(cx, cy, innerR, cx, cy, outerR);
+  pCtx.translate(cx, cy);
+  pCtx.scale(rx, ry);
+  const radGrad = pCtx.createRadialGradient(0, 0, 0.35, 0, 0, 1.0);
   radGrad.addColorStop(0, 'rgba(0,0,0,1)');
-  radGrad.addColorStop(0.55, 'rgba(0,0,0,0.88)');
+  radGrad.addColorStop(0.65, 'rgba(0,0,0,0.92)');
   radGrad.addColorStop(1, 'rgba(0,0,0,0)');
   pCtx.fillStyle = radGrad;
-  pCtx.fillRect(0, 0, width, height);
+  pCtx.fillRect(-1.2, -1.2, 2.4, 2.4);
   pCtx.restore();
 
-  return patchCanvas;
+  return { patchCanvas, normCx, normCy };
+}
+
+/**
+ * Individua i 3 punti ideali di cambio posa (attorno al 25%, 50%, 75% della clip)
+ * agganciandoli alle pause naturali del parlato italiano nel buffer PCM.
+ */
+function findSpeechBeatBoundaries(
+  pcmData: Float32Array | null,
+  sampleRate: number,
+  totalMs: number
+): [number, number, number] {
+  const defaultBounds: [number, number, number] = [
+    totalMs * 0.25,
+    totalMs * 0.5,
+    totalMs * 0.75,
+  ];
+  if (!pcmData || pcmData.length === 0) return defaultBounds;
+
+  const winSamples = Math.max(1, Math.floor(0.06 * sampleRate));
+  const stepMs = 40;
+
+  return defaultBounds.map((nominalMs) => {
+    let bestMs = nominalMs;
+    let minRms = Number.POSITIVE_INFINITY;
+    for (let offset = -380; offset <= 380; offset += stepMs) {
+      const candidateMs = nominalMs + offset;
+      const startIdx = Math.floor((candidateMs / 1000) * sampleRate);
+      if (startIdx < 0 || startIdx + winSamples >= pcmData.length) continue;
+      let sumSq = 0;
+      for (let i = startIdx; i < startIdx + winSamples; i += 4) {
+        const s = pcmData[i];
+        sumSq += s * s;
+      }
+      const rms = Math.sqrt(sumSq / (winSamples / 4));
+      if (rms < minRms) {
+        minRms = rms;
+        bestMs = candidateMs;
+      }
+    }
+    return bestMs;
+  }) as [number, number, number];
 }
 
 function drawCoverVideo(
@@ -428,7 +573,7 @@ function drawCoverVideo(
 
 /**
  * Renderizza un singolo Shot di 10s unendo il vero video AI 24fps (aiVideoDataUrl)
- * con la voce recitata italiana e i sottotitoli.
+ * oppure la Griglia 2x2 a 4 Pose Fisiche Consecutive + Lip-Sync 30fps con la voce italiana.
  */
 export async function renderShotVideoDataUrl(
   params: RenderShotVideoParams
@@ -436,6 +581,7 @@ export async function renderShotVideoDataUrl(
   const {
     frameImageBase64,
     framesBase64 = [],
+    isGrid2x2 = true,
     aiVideoDataUrl,
     audioWavBase64,
     dialogueIta = '',
@@ -522,7 +668,6 @@ export async function renderShotVideoDataUrl(
           vEl.load();
         });
         if (vEl.videoWidth > 0) {
-          // Velocità sempre reale 1.0x (MAI slow-motion!)
           vEl.playbackRate = 1.0;
           await vEl.play().catch(() => {});
           aiVideoEl = vEl;
@@ -532,22 +677,129 @@ export async function renderShotVideoDataUrl(
       }
     }
 
-    // Pre-costruiamo le patch sfumate sul volto/bocca (feathered face patches) per i visemi bocca aperta / semi-aperta
-    // così il resto della stanza e i corpi restano 100% immobili e solo la bocca/espressione si articola a 30fps!
-    const patchOpenCanvas =
+    // Estraiamo i 4 Quadranti Sequenziali (Beat 0..3) dalla Griglia 2x2 Base (bocca chiusa)
+    // e dalle Griglie 2x2 Varianti (bocca aperta "Ah" e bocca semi-aperta "Oh"/"Eh")
+    const closedQuads = sliceGrid2x2IntoQuadrants(
+      loadedFrames[0],
+      width,
+      height,
+      isGrid2x2
+    );
+    const openQuads =
       loadedFrames.length > 1
-        ? buildFeatheredFacePatch(loadedFrames[0], loadedFrames[1], width, height)
-        : null;
-    const patchMidCanvas =
+        ? sliceGrid2x2IntoQuadrants(loadedFrames[1], width, height, isGrid2x2)
+        : closedQuads;
+    const midQuads =
       loadedFrames.length > 2
-        ? buildFeatheredFacePatch(loadedFrames[0], loadedFrames[2], width, height)
-        : patchOpenCanvas;
+        ? sliceGrid2x2IntoQuadrants(loadedFrames[2], width, height, isGrid2x2)
+        : openQuads;
 
-    // Disegna subito il primo fotogramma prima di far partire MediaRecorder
+    // Per ciascuna delle 4 pose fisiche (Beat 0..3), costruiamo la maschera labiale allineata al pixel
+    const beatsData = [0, 1, 2, 3].map((b) => {
+      const openPatch =
+        loadedFrames.length > 1
+          ? buildAlignedMouthPatch(closedQuads[b], openQuads[b], width, height)
+          : null;
+      const midPatch =
+        loadedFrames.length > 2
+          ? buildAlignedMouthPatch(closedQuads[b], midQuads[b], width, height)
+          : openPatch;
+      return {
+        closedCanvas: closedQuads[b],
+        openPatchCanvas: openPatch?.patchCanvas || null,
+        midPatchCanvas: midPatch?.patchCanvas || null,
+        normCx: openPatch?.normCx ?? 0.5,
+        normCy: openPatch?.normCy ?? 0.36,
+      };
+    });
+
+    // Canvas offscreen per sfumare dolcemente i cambi di posa del corpo (Beat b -> Beat b+1)
+    const beatBufferA = document.createElement('canvas');
+    beatBufferA.width = width;
+    beatBufferA.height = height;
+    const ctxBufA = beatBufferA.getContext('2d');
+
+    const beatBufferB = document.createElement('canvas');
+    beatBufferB.width = width;
+    beatBufferB.height = height;
+    const ctxBufB = beatBufferB.getContext('2d');
+
+    const renderSingleBeatPoseWithLips = (
+      targetCtx: CanvasRenderingContext2D,
+      beatIdx: number,
+      sOpen: number,
+      sMid: number,
+      scale: number,
+      pX: number,
+      pY: number,
+      tRad: number
+    ) => {
+      const bData = beatsData[Math.min(3, Math.max(0, beatIdx))];
+      // 1. Disegna la posa fisica completa del Beat (braccia, mani, testa, sfondo 1:1) a bocca chiusa
+      drawCoverSource(
+        targetCtx,
+        bData.closedCanvas,
+        width,
+        height,
+        width,
+        height,
+        scale,
+        pX,
+        pY,
+        tRad,
+        1
+      );
+      // 2. Sovrappone a 30fps la maschera labiale semi-aperta ("Oh"/"Eh")
+      if (bData.midPatchCanvas && sMid > 0.015) {
+        drawCoverSource(
+          targetCtx,
+          bData.midPatchCanvas,
+          width,
+          height,
+          width,
+          height,
+          scale,
+          pX,
+          pY,
+          tRad,
+          Math.min(1, sMid)
+        );
+      }
+      // 3. Sovrappone a 30fps la maschera labiale aperta ("Ah")
+      if (bData.openPatchCanvas && sOpen > 0.015) {
+        drawCoverSource(
+          targetCtx,
+          bData.openPatchCanvas,
+          width,
+          height,
+          width,
+          height,
+          scale,
+          pX,
+          pY,
+          tRad,
+          Math.min(1, sOpen * 1.1)
+        );
+      }
+    };
+
+    // Disegna subito il primo fotogramma (Beat 0) prima di far partire MediaRecorder
     if (aiVideoEl) {
       drawCoverVideo(ctx, aiVideoEl, width, height);
     } else {
-      drawCoverImage(ctx, loadedFrames[0], width, height, 1.02, 0, 0, 0, 1);
+      drawCoverSource(
+        ctx,
+        beatsData[0].closedCanvas,
+        width,
+        height,
+        width,
+        height,
+        1.015,
+        0,
+        0,
+        0,
+        1
+      );
     }
 
     const audioCtx = unlockSharedAudioContext();
@@ -640,6 +892,14 @@ export async function renderShotVideoDataUrl(
       ? totalMs * 0.75
       : 0;
 
+    // Punti di transizione tra le 4 pose fisiche (Beat 0 -> Beat 1 -> Beat 2 -> Beat 3) agganciati alle pause del parlato
+    const beatBounds = findSpeechBeatBoundaries(
+      pcmChannelData,
+      pcmSampleRate,
+      totalMs
+    );
+    const transitionHalfWindowMs = 210; // dissolvenza incrociata morbida di 420ms totali tra una posa e la successiva
+
     let smoothOpen = 0;
     let smoothMid = 0;
     let smoothVoiceEnergy = 0;
@@ -694,41 +954,40 @@ export async function renderShotVideoDataUrl(
         // Soglia silenzio: durante le pause tra le parole o a fine frase la bocca si chiude immediatamente!
         let targetOpen = 0;
         let targetMid = 0;
-        const isSpeakingNow = isWithinSpeechWindow && rmsEnergy >= 0.012;
+        const isSpeakingNow = isWithinSpeechWindow && rmsEnergy >= 0.011;
 
         if (isSpeakingNow) {
-          const normVol = Math.min(1, (rmsEnergy - 0.012) / 0.13);
+          const normVol = Math.min(1, (rmsEnergy - 0.011) / 0.12);
           // Articolazione sillabica naturale (~7Hz) sincronizzata con l'energia vocale e le vocali italiane
-          const syllablePulse = 0.72 + 0.28 * Math.sin(elapsed * 0.045);
-          if (normVol > 0.36 && zeroCrossRate < 0.2) {
+          const syllablePulse = 0.74 + 0.26 * Math.sin(elapsed * 0.046);
+          if (normVol > 0.34 && zeroCrossRate < 0.21) {
             // Vocale aperta ("A", "O", "E" forte) -> visema bocca aperta
-            targetOpen = Math.min(1, normVol * 1.2 * syllablePulse);
+            targetOpen = Math.min(1, normVol * 1.25 * syllablePulse);
             targetMid = Math.max(0, (1 - targetOpen) * 0.45);
           } else {
             // Sillaba media / consonante ("I", "U", "M", "S") -> visema bocca semi-aperta
             targetMid = Math.min(1, normVol * 1.3 * syllablePulse);
-            targetOpen = Math.max(0, (normVol - 0.28) * 0.65);
+            targetOpen = Math.max(0, (normVol - 0.25) * 0.7);
           }
         }
 
         // Filtro esponenziale asimmetrico a 30fps: apertura rapida su attacco sillaba, chiusura morbida su pausa
         smoothOpen +=
-          (targetOpen - smoothOpen) * (targetOpen > smoothOpen ? 0.65 : 0.45);
+          (targetOpen - smoothOpen) * (targetOpen > smoothOpen ? 0.68 : 0.48);
         smoothMid +=
-          (targetMid - smoothMid) * (targetMid > smoothMid ? 0.65 : 0.45);
+          (targetMid - smoothMid) * (targetMid > smoothMid ? 0.68 : 0.48);
         if (smoothOpen < 0.015) smoothOpen = 0;
         if (smoothMid < 0.015) smoothMid = 0;
 
         const rawVoiceEnergy = isSpeakingNow
           ? Math.min(1, rmsEnergy * 6.5)
           : 0;
-        smoothVoiceEnergy += (rawVoiceEnergy - smoothVoiceEnergy) * 0.35;
+        smoothVoiceEnergy += (rawVoiceEnergy - smoothVoiceEnergy) * 0.32;
 
         ctx.fillStyle = '#09090b';
         ctx.fillRect(0, 0, width, height);
 
         if (aiVideoEl && aiVideoEl.videoWidth > 0) {
-          // Sincronizzazione diretta del VERO video animato AI con la voce italiana e velocità reale 1.15x (mai lento!)
           if (isWithinSpeechWindow) {
             if (isSpeakingNow) {
               aiVideoEl.playbackRate = 1.15 + smoothVoiceEnergy * 0.18;
@@ -736,12 +995,10 @@ export async function renderShotVideoDataUrl(
                 aiVideoEl.play().catch(() => {});
               }
             } else {
-              // Pausa tra le parole: rallenta il movimento labiale per seguire il respiro
               aiVideoEl.playbackRate = 0.25;
             }
             drawCoverVideo(ctx, aiVideoEl, width, height);
           } else {
-            // La battuta vocale è terminata: ferma il parlato e sfuma dolcemente sulla posa sorridente a bocca chiusa
             if (!aiVideoEl.paused) {
               aiVideoEl.pause();
             }
@@ -751,9 +1008,11 @@ export async function renderShotVideoDataUrl(
               Math.max(0, (elapsed - audioDurationMs) / 450)
             );
             if (postSpeechFade > 0.02) {
-              drawCoverImage(
+              drawCoverSource(
                 ctx,
-                loadedFrames[0],
+                beatsData[3].closedCanvas,
+                width,
+                height,
                 width,
                 height,
                 1.01,
@@ -765,82 +1024,83 @@ export async function renderShotVideoDataUrl(
             }
           }
         } else {
-          // Nessuna vibrazione ad alta frequenza: solo movimento cinematografico lento e fluido
-          const baseScale = 1.01 + progress * 0.025;
-          const panX = Math.sin(progress * Math.PI) * (width * 0.008);
-          const panY = 0;
+          // Respiro naturale della camera + leggero accento enfatico sincronizzato con l'energia della voce
+          const baseScale =
+            1.015 + progress * 0.02 + smoothVoiceEnergy * 0.006;
+          const panX = Math.sin(progress * Math.PI * 2) * (width * 0.006);
+          const panY = -smoothVoiceEnergy * (height * 0.003);
           const tiltRad = 0;
 
-          // 1. Disegna il fotogramma base (bocca chiusa, 100% fedele alla foto di partenza)
-          drawCoverImage(
-            ctx,
-            loadedFrames[0],
-            width,
-            height,
-            baseScale,
-            panX,
-            panY,
-            tiltRad,
-            1
-          );
-
-          // 2. Sovrappone in modo fluido a 30fps il fotogramma/patch visema semi-aperto (sillabe medie)
-          if (loadedFrames.length > 2 && smoothMid > 0.015) {
-            drawCoverImage(
-              ctx,
-              loadedFrames[2],
-              width,
-              height,
-              baseScale,
-              panX,
-              panY,
-              tiltRad,
-              Math.min(1, smoothMid * 0.85)
-            );
-          }
-          if (patchMidCanvas && smoothMid > 0.015) {
-            drawCoverSource(
-              ctx,
-              patchMidCanvas,
-              width,
-              height,
-              width,
-              height,
-              baseScale,
-              panX,
-              panY,
-              tiltRad,
-              Math.min(1, smoothMid)
-            );
+          // Determina in quale dei 4 Beat fisici (0..3) ci troviamo e se siamo in transizione morbida tra due pose
+          let primaryBeat = 0;
+          if (elapsed >= beatBounds[2]) {
+            primaryBeat = 3;
+          } else if (elapsed >= beatBounds[1]) {
+            primaryBeat = 2;
+          } else if (elapsed >= beatBounds[0]) {
+            primaryBeat = 1;
           }
 
-          // 3. Sovrappone in modo fluido a 30fps il fotogramma/patch visema bocca aperta (vocali "Ah"/"Oh")
-          if (loadedFrames.length > 1 && smoothOpen > 0.015) {
-            drawCoverImage(
-              ctx,
-              loadedFrames[1],
-              width,
-              height,
-              baseScale,
-              panX,
-              panY,
-              tiltRad,
-              Math.min(1, smoothOpen * 0.85)
-            );
+          let transitionFromBeat = -1;
+          let transitionToBeat = -1;
+          let transitionBlend = 0;
+
+          for (let b = 0; b < 3; b++) {
+            const dist = elapsed - beatBounds[b];
+            if (Math.abs(dist) <= transitionHalfWindowMs) {
+              transitionFromBeat = b;
+              transitionToBeat = b + 1;
+              const rawT =
+                (dist + transitionHalfWindowMs) / (transitionHalfWindowMs * 2);
+              // Curva cubic ease-in-out per un cambio gesto fluido e naturale
+              transitionBlend = rawT * rawT * (3 - 2 * rawT);
+              break;
+            }
           }
-          if (patchOpenCanvas && smoothOpen > 0.015) {
-            drawCoverSource(
-              ctx,
-              patchOpenCanvas,
-              width,
-              height,
-              width,
-              height,
+
+          if (
+            transitionFromBeat >= 0 &&
+            transitionToBeat >= 0 &&
+            ctxBufA &&
+            ctxBufB
+          ) {
+            ctxBufA.clearRect(0, 0, width, height);
+            ctxBufB.clearRect(0, 0, width, height);
+            renderSingleBeatPoseWithLips(
+              ctxBufA,
+              transitionFromBeat,
+              smoothOpen,
+              smoothMid,
               baseScale,
               panX,
               panY,
-              tiltRad,
-              Math.min(1, smoothOpen)
+              tiltRad
+            );
+            renderSingleBeatPoseWithLips(
+              ctxBufB,
+              transitionToBeat,
+              smoothOpen,
+              smoothMid,
+              baseScale,
+              panX,
+              panY,
+              tiltRad
+            );
+            ctx.drawImage(beatBufferA, 0, 0);
+            ctx.save();
+            ctx.globalAlpha = transitionBlend;
+            ctx.drawImage(beatBufferB, 0, 0);
+            ctx.restore();
+          } else {
+            renderSingleBeatPoseWithLips(
+              ctx,
+              primaryBeat,
+              smoothOpen,
+              smoothMid,
+              baseScale,
+              panX,
+              panY,
+              tiltRad
             );
           }
         }
