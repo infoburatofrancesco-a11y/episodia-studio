@@ -116,6 +116,19 @@ export default function StoryboardStudioView({
     useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [currentPlaylistIdx, setCurrentPlaylistIdx] = useState(0);
+  const [veoApiKey, setVeoApiKey] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return window.localStorage.getItem('episodia_veo_api_key') || '';
+    }
+    return '';
+  });
+
+  const handleSaveVeoApiKey = (val: string) => {
+    setVeoApiKey(val);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('episodia_veo_api_key', val.trim());
+    }
+  };
 
   if (!activeSeries || seriesList.length === 0) {
     return (
@@ -349,6 +362,69 @@ export default function StoryboardStudioView({
       );
       const rawRefPhoto = rawRefList[0] || cast[0]?.referenceImageBase64;
 
+      // MODALITÀ 1: GOOGLE VEO 3.1 NATIVO ("Ingredients to Video" come nell'app Gemini Web)
+      // Se è presente una chiave Google AI Studio (AIzaSy...) o se il server ha Veo 3.1 sbloccato,
+      // genera un VERO video MP4 nativo in cui gli attori si muovono, interagiscono e parlano!
+      try {
+        setShotProgressText(
+          'Avvio Google Veo 3.1 (Ingredients to Video con foto attori)...'
+        );
+        const veoStartRes = await fetch('/api/generate-veo-video', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'start',
+            customApiKey: veoApiKey.trim() || undefined,
+            visualPromptEn: shot.visualPromptEn,
+            dialogueIta: shot.dialogueIta,
+            speakerName: speaker?.name,
+            characterNames: orderedChars.map((c) => c.name),
+            aspectRatio,
+            referenceImagesBase64: compressedRefs,
+          }),
+        });
+
+        if (veoStartRes.ok) {
+          const veoStartData = await veoStartRes.json();
+          if (veoStartData.ok && veoStartData.operationName) {
+            for (let attempt = 1; attempt <= 28; attempt++) {
+              setShotProgressText(
+                `Google Veo 3.1 sta generando il video animato reale (${attempt * 5}s)...`
+              );
+              await new Promise((r) => setTimeout(r, 5000));
+              const pollRes = await fetch('/api/generate-veo-video', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  action: 'poll',
+                  operationName: veoStartData.operationName,
+                  customApiKey: veoApiKey.trim() || undefined,
+                }),
+              });
+              const pollData = await pollRes.json();
+              if (pollData.done && pollData.videoDataUrl) {
+                await saveLocalGeneratedVideo(shot.id, pollData.videoDataUrl);
+                await handleShotChange(shot.id, {
+                  videoUrl: pollData.videoDataUrl,
+                  localMediaKey: shot.id,
+                  duration: 10,
+                  status: 'ready',
+                });
+                setMergedEpisodePreviewUrl(null);
+                return pollData.videoDataUrl;
+              }
+              if (pollData.done && pollData.error) {
+                console.warn('Veo 3.1 poll error, fallback Nano Banana:', pollData.error);
+                break;
+              }
+            }
+          }
+        }
+      } catch (veoErr) {
+        console.warn('Fallback da Veo 3.1 a Nano Banana:', veoErr);
+      }
+
+      // MODALITÀ 2 (Fallback se la chiave è AQ.Ab8RN... bloccata su PredictLongRunning):
       // CHIAMATA 1 (Veloce < 8s): Scena Base (Fedeltà 1:1 alle foto originali) + Voce Italiana Madrelingua
       const mediaRes = await fetch('/api/generate-shot-media', {
         method: 'POST',
@@ -711,6 +787,35 @@ export default function StoryboardStudioView({
 
   return (
     <div className="space-y-6">
+      {/* BANNER MOTORE VIDEO REALE GOOGLE VEO 3.1 ("INGREDIENTS TO VIDEO") */}
+      <div className="bg-gradient-to-r from-violet-950/50 via-zinc-900 to-amber-950/30 border border-amber-500/40 rounded-2xl p-4 shadow-xl flex flex-wrap items-center justify-between gap-4">
+        <div className="space-y-1 max-w-2xl">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-amber-400" />
+            <span className="text-xs font-extrabold uppercase tracking-wider text-amber-300">
+              Motore Video Animato Nativo Google Veo 3.1 (Ingredients to Video)
+            </span>
+          </div>
+          <p className="text-[11px] text-zinc-300 leading-relaxed">
+            La chiave Vertex Express attuale (<code className="text-amber-300">AQ.Ab8RN...</code>) ha il metodo <code className="text-amber-300">PredictLongRunning</code> (Veo 3.1) bloccato da Google Cloud (<code className="text-red-300">API_KEY_SERVICE_BLOCKED</code>). Incolla qui una chiave <strong>Google AI Studio (<code className="text-emerald-300">AIzaSy...</code>)</strong> da <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="underline text-amber-300 hover:text-amber-200">aistudio.google.com/apikey</a> per generare video MP4 reali con <strong>Veo 3.1</strong> identici a Gemini Web!
+          </p>
+        </div>
+        <div className="flex items-center gap-2 flex-1 min-w-[260px] max-w-md">
+          <input
+            type="password"
+            value={veoApiKey}
+            onChange={(e) => handleSaveVeoApiKey(e.target.value)}
+            placeholder="Incolla chiave AI Studio (AIzaSy...) per Veo 3.1"
+            className="w-full rounded-xl bg-zinc-950 border border-amber-500/40 px-3 py-2 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-amber-400"
+          />
+          {veoApiKey.trim().startsWith('AIza') && (
+            <span className="px-2.5 py-1.5 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold whitespace-nowrap">
+              Veo 3.1 Attivo
+            </span>
+          )}
+        </div>
+      </div>
+
       {/* SCHEDA METADATI PUNTATA + PULSANTE ESPORTAZIONE CON SIGLA IN TESTA */}
       <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-6 shadow-2xl space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-zinc-800">
